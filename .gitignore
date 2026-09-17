@@ -1,0 +1,31 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+.eggs/
+
+# Virtual environments. uv makes .venv; teammates on plain pip often name
+# theirs venv/ or env/, so ignore those too rather than have one land in a PR.
+.venv
+venv/
+env/
+ENV/
+
+# Editor / OS noise
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# NOT ignored, on purpose:
+#   uv.lock                 a lockfile exists to be shared; pip users just
+#                           ignore the file, it costs them nothing
+#   .python-version         pins 3.12 -- and matters MORE for pip users, who do
+#                           not get the interpreter picked for them
+#   calib/intrinsics.json   shared: the team is on one rig. If you end up on
+#                           different webcams, ignore it -- the loader only
+#                           rejects a mismatched RESOLUTION, so two cameras both
+#                           at 1280x720 would silently share one wrong fx.

@@ -1,9 +1,13 @@
 """Prove the field maths without a camera.
 
 Renders synthetic images of a tag at known field positions, runs them through
-the real detector and the real field.py code, and checks the numbers come back.
+the real detector and the real vision_core/field.py code, and checks the numbers come back.
 If this passes, any error you see later is in the camera, the intrinsics, or the
 tag on the phone -- not in the geometry.
+
+The swap that section 3 exercises is the reason vision-core exists: the field
+pose can come from thin air or from four reference tags, and nothing downstream
+notices.
 
     uv run selfcheck
 """
@@ -14,12 +18,14 @@ import cv2
 import numpy as np
 import pupil_apriltags as pa
 
-from .field import (
+from vision_core.field import (
     Field,
     ReferenceTagFieldTransform,
     SyntheticFieldTransform,
-    tag_field_pose,
 )
+from vision_core.intrinsics import from_fov
+
+from .pose import tag_field_pose
 
 TAG_FAMILY = "tag36h11"
 MODULES = 8  # tag36h11 is 8x8 modules edge-to-edge of the black square
@@ -34,12 +40,9 @@ TOL_OFF_PLANE_M = 0.030
 TOL_THETA_DEG = 2.0
 
 
-def intrinsics(width: int, height: int, hfov_deg: float = 60.0) -> np.ndarray:
-    """A plausible pinhole camera. Same helper the tracker uses."""
-    fx = (width / 2.0) / np.tan(np.radians(hfov_deg) / 2.0)
-    return np.array(
-        [[fx, 0, width / 2.0], [0, fx, height / 2.0], [0, 0, 1]], np.float64
-    )
+#: A plausible pinhole camera -- literally the helper the tracker uses, so this
+#: check cannot pass against a camera model the live path does not share.
+intrinsics = from_fov
 
 
 def tag_image(tag_id: int, px_per_module: int = 24) -> np.ndarray:

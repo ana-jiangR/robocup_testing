@@ -1,0 +1,27 @@
+[project]
+name = "simulated-robot-application"
+version = "0.1.0"
+description = "A collection of robotics capabilities, one folder per skill"
+readme = "README.md"
+# pupil-apriltags ships prebuilt wheels for cp310-cp313 only. On 3.14 pip
+# compiles it from source and the result is missing apriltag.dll, so the
+# tracker dies at import. Fail at resolve time instead.
+requires-python = ">=3.12,<3.14"
+# The root depends on every member so that `uv run track` and `uv run selfcheck`
+# work from the repo root, against one shared .venv. Each skill still has its own
+# pyproject and still installs standalone.
+dependencies = [
+    "vision-core",
+    "tag-tracking",
+]
+
+[tool.uv]
+# The root is a workspace, not a library. Nothing here to build or import.
+package = false
+
+[tool.uv.workspace]
+members = ["vision-core", "tag-tracking"]
+
+[tool.uv.sources]
+vision-core = { workspace = true }
+tag-tracking = { workspace = true }

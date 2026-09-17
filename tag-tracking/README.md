@@ -8,6 +8,10 @@ Built as a proof of concept for a RoboCup setup where the field will be real and
 located by four reference AprilTags. The camera-to-field transform is isolated in
 one file so that swap costs one subclass and changes nothing downstream.
 
+**Skill 1** of this repo. The geometry it stands on lives in
+[`vision-core`](../vision-core/), ready to be shared with the skills that follow;
+everything below runs from the repo root.
+
 ## Run it in order
 
 ### 0 · Check the maths (no camera, no phone)
@@ -17,7 +21,8 @@ uv run selfcheck
 ```
 
 Renders synthetic pictures of a tag at known field positions, pushes them through
-the real detector and the real `field.py`, and checks the numbers come back.
+the real detector and the real `vision_core/field.py`, and checks the numbers come
+back.
 
 You should see three sections, all `[ok ]`, ending in *"All checks passed."*
 Section 3 is the one that matters for RoboCup: it puts a tag at a known spot,
@@ -76,7 +81,7 @@ You should see one window, camera on the left and a plan view on the right:
 - a **green rectangle** floating in the scene — the virtual field, with corners
   labelled `(0,0) (W,0) (W,H) (0,H)`, a 20 cm grid, and red/green arrows for
   field +X and +Y at the origin corner;
-- your tag **outlined in colour** when detected, labelled with its field position;
+- your tag **outlined in color** when detected, labelled with its field position;
 - a **plan view** with the tag as a dot, a heading arrow, and a fading trail;
 - a **black strip along the bottom** with one line per tag:
 
@@ -95,7 +100,7 @@ Useful flags:
 
 ```powershell
 uv run track --field 1.2 0.8 --distance 1.8      # field size, and how far out it floats
-uv run track --mode floor --cam-height 1.0 --pitch 35   # lay the field flat instead
+uv run track --mode floor                        # field flat, camera overhead 1.5 m up
 uv run track --list-cameras                      # if it grabs the wrong one
 uv run track --camera 2 --display-width 1300     # pick a camera, shrink the window
 uv run track --print-poses                       # stream id/x/y/theta to stdout
@@ -146,8 +151,9 @@ Two cheap upgrades, in order:
 1. **Tell it the FOV**: `uv run track --hfov 70` if you know your webcam's spec.
 2. **One-parameter fix, which is most of the benefit.** Hold the phone at a
    tape-measured distance, watch the reported depth, and press `[` / `]` until it
-   matches. Press `s` to save to `calib/intrinsics.json`, which is loaded
-   automatically next run. This directly calibrates `fx` — the parameter that
+   matches. Press `s` to save to `calib/intrinsics.json` **at the repo root**,
+   which is loaded automatically next run — and shared with the ball tracker,
+   since it describes the camera rather than this skill. This directly calibrates `fx` — the parameter that
    actually matters — usually to within a couple of percent.
 
 > One catch worth knowing: **tag-size error and `fx` error are the same error.**
@@ -167,7 +173,8 @@ corner reference tags live. Do a proper chessboard calibration then
 
 ## Swapping in the real field
 
-Everything about where the field is lives in `src/apriltag_test/field.py`.
+Everything about where the field is lives in `vision-core/src/vision_core/field.py`
+— not in this skill, because the ball tracker needs exactly the same answer.
 
 The contract is `CameraFieldTransform`: a rigid transform holding `R` and `t`
 such that `p_camera = R @ p_field + t`. Subclasses only decide **how those are
@@ -206,7 +213,7 @@ from field +X, counter-clockwise positive, **0 when the tag is upright**. Use
 
 The detector's own tag frame has +X pointing to the tag's visual *left* — a 180°
 rotation from what you would guess. That is handled once, in `TAG_VISUAL_RIGHT`
-in `field.py`, and `selfcheck` fails loudly if it ever changes.
+in `src/tag_tracking/pose.py`, and `selfcheck` fails loudly if it ever changes.
 
 The camera view is **not mirrored**. It shows what the camera sees, so the
 overlay lands on the phone exactly, and the plan view agrees with the video.
@@ -227,10 +234,24 @@ overlay lands on the phone exactly, and the plan view agrees with the video.
 ## Layout
 
 ```
-src/apriltag_test/
-  field.py       the swap point: Field, CameraFieldTransform, TagFieldPose
+src/tag_tracking/
+  pose.py        TagFieldPose, tag_field_pose, TAG_VISUAL_RIGHT -- the tag-shaped bits
   track.py       live tracking, overlay, plan view
   serve_tag.py   serves the tag to the phone at a known physical size
   selfcheck.py   synthetic end-to-end verification, no hardware
-calib/           intrinsics.json lands here when you press 's'
 ```
+
+and, from the shared floor one level up:
+
+```
+../vision-core/src/vision_core/
+  field.py       the swap point: Field, CameraFieldTransform, Synthetic/ReferenceTag
+  camera.py      open_camera, list_cameras, lock_camera
+  intrinsics.py  load / save / from_fov / hfov_of
+  planview.py    draw_field on the video, PlanView beside it
+../calib/        intrinsics.json lands here when you press 's'
+```
+
+`pose.py` holds what is *about AprilTags*; `field.py` holds what is *about the
+field*. The line matters: when reference tags get mounted, `field.py` changes and
+nothing in this folder does.

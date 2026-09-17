@@ -2,11 +2,11 @@
 
 THIS FILE IS THE SWAP POINT.
 
-Everything downstream (tracking, drawing, the printed x/y/theta) depends only on
-the small contract in this file:
+Everything downstream -- tag tracking, ball tracking, drawing, the printed
+x/y/theta -- depends only on the small contract in this file:
 
+    Field                 -- the rectangle, in metres
     CameraFieldTransform  -- a rigid pose: field coordinates -> camera coordinates
-    TagFieldPose          -- the output record: tag_id, x, y, theta_deg, ...
 
 Today the pose is invented (SyntheticFieldTransform): we simply declare that a
 1.2 x 0.8 m rectangle floats some distance in front of the lens. Nothing
@@ -17,16 +17,21 @@ field positions. That is a new subclass (see ReferenceTagFieldTransform below)
 which fills in the same R and t. No other file changes, and the output format
 does not change.
 
+This lives in vision-core, not in the tag skill, because every skill reporting a
+field position needs it -- the ball tracker has no interest in AprilTags but very
+much needs the field *located*. Anything tag-shaped (TagFieldPose,
+tag_field_pose, TAG_VISUAL_RIGHT) lives in tag_tracking.pose instead.
+
 Coordinate conventions
 ----------------------
 Camera frame (OpenCV): +X right, +Y down, +Z forward out of the lens. Metres.
 
 Field frame: origin at one corner of the rectangle, +X along `width`,
 +Y along `height`, +Z along the field's surface normal. Right-handed.
-A tag at (0, 0) sits over the origin corner; (width, height) is the far corner.
+A point at (0, 0) sits over the origin corner; (width, height) is the far corner.
 
-theta is the tag's rotation about the field normal +Z, in degrees, measured from
-field +X, counter-clockwise positive, and 0 when the tag is upright.
+theta, where a skill reports one, is a rotation about the field normal +Z, in
+degrees, measured from field +X, counter-clockwise positive.
 """
 
 from __future__ import annotations
@@ -38,25 +43,8 @@ from pathlib import Path
 import numpy as np
 
 # --------------------------------------------------------------------------
-# Output contract. Downstream code reads these fields; keep them stable.
+# The field itself.
 # --------------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class TagFieldPose:
-    """Where one tag is, in field coordinates."""
-
-    tag_id: int
-    x: float  # metres from the origin corner, along field +X
-    y: float  # metres from the origin corner, along field +Y
-    theta_deg: float  # rotation about the field normal, -180..180
-    off_plane_m: float  # signed distance off the field plane (along field +Z)
-    inside: bool  # within the rectangle in both x and y
-    decision_margin: float  # detector confidence, higher is better
-
-    def as_tuple(self) -> tuple[int, float, float, float]:
-        """The frozen public format: (id, x, y, theta_deg)."""
-        return (self.tag_id, self.x, self.y, self.theta_deg)
 
 
 @dataclass(frozen=True)
@@ -185,7 +173,7 @@ class SyntheticFieldTransform(CameraFieldTransform):
     floor -- the rectangle lies flat, camera `height` metres above the surface
              looking down at `pitch` degrees. Geometrically the RoboCup case,
              and awkward to demo by hand, but it proves nothing downstream
-             assumed a fronto-parallel plane.
+             assumed a fronto-parallel plane. The default is straight down.
     """
 
     @classmethod
@@ -216,9 +204,20 @@ class SyntheticFieldTransform(CameraFieldTransform):
     def floor(
         cls,
         field: Field,
-        height: float = 1.0,
-        pitch_deg: float = 35.0,
+        height: float = 1.5,
+        pitch_deg: float = 90.0,
     ) -> SyntheticFieldTransform:
+        """Camera above the field, looking down at `pitch` degrees from horizontal.
+
+        90 is the rig this is built for: directly over the field centre. Below 90
+        the camera backs off to the -Y side so its axis still lands on the
+        centre, which at shallow angles puts it outside the field entirely.
+
+        Straight down is the kinder geometry -- the ball-centre height correction
+        (see ball.py) vanishes directly beneath the camera. The cost is airborne
+        sensitivity: a rising ball produces less depth disagreement from steeper
+        up. Any angle works; nothing downstream knows or cares.
+        """
         phi = np.radians(max(abs(pitch_deg), 1e-3))
         # Camera axes expressed in field coords, for a camera tilted down by phi:
         # +X right, +Z forward and downward, +Y down-ish.
@@ -231,14 +230,15 @@ class SyntheticFieldTransform(CameraFieldTransform):
             np.float64,
         )
         R = R_cam_to_field.T  # field -> camera
-        # Sit the camera so its optical axis lands on the field centre.
+        # Sit the camera so its optical axis lands on the field centre. At
+        # pitch 90 the tangent blows up and the offset goes to zero, which is
+        # exactly right: straight down means directly above the centre.
         cam_in_field = np.array(
             [field.width / 2.0, field.height / 2.0 - height / np.tan(phi), float(height)]
         )
         t = -R @ cam_in_field
-        return cls(
-            R, t, f"synthetic floor, cam {height:.2f} m up, {pitch_deg:.0f} deg down"
-        )
+        where = "overhead" if abs(pitch_deg) >= 89.5 else f"{pitch_deg:.0f} deg down"
+        return cls(R, t, f"synthetic floor, cam {height:.2f} m up, {where}")
 
 
 # --------------------------------------------------------------------------
@@ -249,18 +249,15 @@ class SyntheticFieldTransform(CameraFieldTransform):
 class ReferenceTagFieldTransform(CameraFieldTransform):
     """Field pose solved from reference tags at known field positions.
 
-    This is the RoboCup path. Fix four tags to the real field, record where
-    their centres are in field coordinates, and this recovers R and t from a
-    single camera frame. Construction is the only difference from the synthetic
-    case; every method inherited above, and the x/y/theta that comes out, is
-    unchanged.
+    The RoboCup path. Fix four tags to the real field, record their centres in
+    field coordinates, and this recovers R and t from one frame. Construction is
+    the only difference from the synthetic case.
 
-    `layout` maps tag_id -> (x, y) in metres, e.g. the four field corners:
+    `layout` maps tag_id -> (x, y) in metres, e.g. the four corners:
+    {0: (0.0, 0.0), 1: (1.2, 0.0), 2: (1.2, 0.8), 3: (0.0, 0.8)}
 
-        {0: (0.0, 0.0), 1: (1.2, 0.0), 2: (1.2, 0.8), 3: (0.0, 0.8)}
-
-    Unlike the synthetic transform, this one needs real camera intrinsics to be
-    worth anything -- the errors no longer cancel. See the README.
+    Unlike the synthetic transform this needs real intrinsics to be worth
+    anything -- the errors no longer cancel. See the README.
     """
 
     MIN_TAGS = 4
@@ -312,59 +309,3 @@ class ReferenceTagFieldTransform(CameraFieldTransform):
     def load(cls, path: str | Path) -> ReferenceTagFieldTransform:
         d = json.loads(Path(path).read_text())
         return cls(np.array(d["R"]), np.array(d["t"]), d.get("source", str(path)))
-
-
-# --------------------------------------------------------------------------
-# Detection -> field pose. Downstream of the swap point: this must not care
-# which CameraFieldTransform it was handed.
-# --------------------------------------------------------------------------
-
-
-#: Which axis of the detector's tag frame points to the tag's visual right --
-#: the direction that runs left-to-right across an upright tag as you look at it.
-#:
-#: pupil_apriltags reports pose_R with the tag's +X axis pointing to the tag's
-#: visual LEFT, +Y up and +Z into the tag (away from the viewer). That is a 180
-#: degree rotation about the tag normal from the convention you might expect, so
-#: visual-right is -X. Established empirically; selfcheck.py fails loudly if it
-#: ever changes.
-TAG_VISUAL_RIGHT = np.array([-1.0, 0.0, 0.0])
-
-
-def tag_field_pose(
-    detection,
-    transform: CameraFieldTransform,
-    field: Field,
-    heading_offset_deg: float = 0.0,
-) -> TagFieldPose:
-    """Convert one pose-estimated AprilTag detection into field coordinates.
-
-    `detection` must come from Detector.detect(..., estimate_tag_pose=True), so
-    that it carries pose_R (tag->camera rotation) and pose_t (the tag centre in
-    camera coords, metres).
-
-    theta is 0 when the tag is upright, and increases counter-clockwise as seen
-    from in front of the field. `heading_offset_deg` is added to it, for when the
-    tag is mounted on a robot that does not face the same way as the tag's right
-    edge -- a robot with the tag rotated 90 degrees on its shell wants -90 here.
-    """
-    centre_cam = np.asarray(detection.pose_t, dtype=np.float64).reshape(3)
-    x, y, z = transform.camera_to_field(centre_cam)[0]
-
-    # Heading: take the direction that points right across the upright tag,
-    # express it in the field frame, and measure its angle about the field normal.
-    pose_R = np.asarray(detection.pose_R, dtype=np.float64).reshape(3, 3)
-    forward_cam = pose_R @ TAG_VISUAL_RIGHT
-    vx, vy, _ = transform.direction_to_field(forward_cam)[0]
-    theta = float(np.degrees(np.arctan2(vy, vx)) + heading_offset_deg)
-    theta = (theta + 180.0) % 360.0 - 180.0  # wrap to (-180, 180]
-
-    return TagFieldPose(
-        tag_id=int(detection.tag_id),
-        x=float(x),
-        y=float(y),
-        theta_deg=theta,
-        off_plane_m=float(z),
-        inside=field.contains(float(x), float(y)),
-        decision_margin=float(detection.decision_margin),
-    )
