@@ -68,47 +68,6 @@ pip install -e ./tag-tracking
 `uv.lock` is committed and pins exact versions for uv users; pip users resolve
 fresh and may get slightly different ones.
 
-## Why a uv workspace, and not sibling folders
-
-Because of one promise, made in `vision-core/src/vision_core/field.py`:
-
-> **This file is the swap point.** Moving from a field pose we *invented* to one
-> *measured* from four reference AprilTags costs one subclass and changes nothing
-> downstream.
-
-`selfcheck` section 3 exercises exactly that substitution and prints the same tag
-under both transforms.
-
-The next skill — ball tracking — needs the identical transform. It has no
-interest in AprilTags, but it very much needs the field to be *located* before it
-can say where a ball is on it. Two independent folders would mean two copies of
-`field.py`, and the promise would quietly expire the first day real reference
-tags go up on the field. One workspace, one lockfile, one `.venv`, one copy.
-
-```
-tag-tracking  ──→  vision-core
-```
-
-One direction, always. `vision-core` never imports from a skill. That is also
-why `vision-core` is a separate package rather than a folder inside
-`tag-tracking`: nothing in it is about AprilTags.
-
-## Layout
-
-```
-pyproject.toml     workspace root: package = false, depends on all members
-uv.lock            one lockfile for everything
-calib/             intrinsics.json — resolved via repo_root()
-vision-core/       field.py, camera.py, intrinsics.py, paths.py, planview.py
-tag-tracking/      pose.py, track.py, selfcheck.py, serve_tag.py
-```
-
-`calib/` sits at the root and is resolved by walking up from the source file
-(`vision_core.paths.repo_root`), never from the current directory — otherwise
-"which intrinsics did it load?" would depend on which folder you launched from,
-and the failure is silent, because a missing file just falls back to a guessed
-field of view.
-
 ## Adding a skill
 
 1. `mkdir new-skill/src/new_skill`, give it a `pyproject.toml` depending on
