@@ -38,7 +38,7 @@ import cv2
 import numpy as np
 import pupil_apriltags as pa
 from vision_core import intrinsics as intr
-from vision_core.camera import list_cameras, open_camera
+from vision_core.camera import list_cameras, open_camera, read_key
 from vision_core.field import (
     CameraFieldTransform,
     Field,
@@ -444,7 +444,7 @@ def main() -> None:
                                    interpolation=cv2.INTER_AREA)
         cv2.imshow(win, composite)
 
-        key = cv2.waitKey(1) & 0xFF
+        key = read_key()
         if key in (ord("q"), 27):
             break
         elif key == ord("g"):

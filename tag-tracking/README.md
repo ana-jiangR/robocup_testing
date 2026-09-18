@@ -373,6 +373,8 @@ overlay lands on the phone exactly, and the plan view agrees with the video.
 | Distances feel wrong | `fx` and/or tag size. See the calibration section. |
 | Wrong camera opens | `uv run track --list-cameras`, then `--camera N`. |
 | Camera opens but no frames | Another app has it (Teams, Zoom), or Windows camera privacy settings. |
+| Keys do nothing, mouse works | Click the video window first. If letters are still ignored, an input method is swallowing them — switch to English, or press `Esc`, which no IME intercepts. |
+| `q` does nothing in a calibrate tool | By design until enough frames are captured. The window's counter shows how many; `Esc` always aborts. |
 | Window too big for the screen | `--display-width 1300` |
 | Field not visible in frame | `--distance` too small crops it, too large shrinks it. Default 1.8 m fits 1.2 × 0.8. |
 

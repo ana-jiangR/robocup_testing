@@ -19,7 +19,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 from vision_core import intrinsics as intr
-from vision_core.camera import open_camera
+from vision_core.camera import open_camera, read_key
 from vision_core.charuco import (
     MIN_FRAMES,
     SyntheticChArucoCamera,
@@ -96,7 +96,7 @@ def _run_live(args):
                 cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0) if good else (0, 0, 255), 2, cv2.LINE_AA,
             )
             cv2.imshow(win, disp)
-            key = cv2.waitKey(1) & 0xFF
+            key = read_key()
             if key == 27:
                 print("aborted")
                 raise SystemExit(0)

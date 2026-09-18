@@ -39,6 +39,13 @@ def _backends() -> list[tuple[int, str]]:
     return [(cv2.CAP_V4L2, "V4L2"), (cv2.CAP_ANY, "ANY")]
 
 
+def read_key(delay_ms: int = 1) -> int:
+    """cv2.waitKey with the key folded to lowercase, so Caps Lock or Shift
+    cannot silently make 'q' and 's' stop working."""
+    key = cv2.waitKey(delay_ms) & 0xFF
+    return key + 32 if ord("A") <= key <= ord("Z") else key
+
+
 def open_camera(index: int, width: int, height: int) -> cv2.VideoCapture:
     """Open a camera, trying backends in an OS-appropriate order."""
     last = None

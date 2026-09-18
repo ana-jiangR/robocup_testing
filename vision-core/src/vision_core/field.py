@@ -246,6 +246,17 @@ class SyntheticFieldTransform(CameraFieldTransform):
 # --------------------------------------------------------------------------
 
 
+FIELD_POSE_NAME = "field_pose.json"
+
+
+def field_pose_path() -> Path:
+    """calib/field_pose.json at the repo root: where calibrate-field saves the
+    measured pose and where every skill's tracker looks for it."""
+    from .paths import calib_path
+
+    return calib_path(FIELD_POSE_NAME)
+
+
 class ReferenceTagFieldTransform(CameraFieldTransform):
     """Field pose solved from reference tags at known field positions.
 

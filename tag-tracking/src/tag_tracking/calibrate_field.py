@@ -28,19 +28,18 @@ from typing import Callable, Iterable
 import cv2
 import numpy as np
 import pupil_apriltags as pa
-from vision_core.camera import open_camera
-from vision_core.field import Field, ReferenceTagFieldTransform, SyntheticFieldTransform
-from vision_core.paths import calib_path
+from vision_core.camera import open_camera, read_key
+from vision_core.field import (
+    Field,
+    ReferenceTagFieldTransform,
+    SyntheticFieldTransform,
+    field_pose_path,
+)
 
 from .pose import tag_field_pose
 
-FIELD_POSE_NAME = "field_pose.json"
 MIN_FRAMES = 10
 MAX_LIVE_FRAMES = 40
-
-
-def field_pose_path() -> Path:
-    return calib_path(FIELD_POSE_NAME)
 
 
 def default_field_layout(field: Field) -> dict[int, tuple[float, float]]:
@@ -186,7 +185,7 @@ def capture_reference_frames(
                 cv2.FONT_HERSHEY_SIMPLEX, 0.58, (0, 255, 0) if ready else (200, 200, 200), 1, cv2.LINE_AA,
             )
             cv2.imshow(win, disp)
-            key = cv2.waitKey(1) & 0xFF
+            key = read_key()
             if key == 27:
                 print("aborted")
                 raise SystemExit(0)
