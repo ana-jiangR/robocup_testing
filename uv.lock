@@ -5,7 +5,7 @@ requires-python = ">=3.12, <3.14"
 [manifest]
 members = [
     "ball-tracking",
-    "simulated-robot-application",
+    "robocup-testing",
     "tag-tracking",
     "vision-core",
 ]
@@ -94,7 +94,7 @@ wheels = [
 ]
 
 [[package]]
-name = "simulated-robot-application"
+name = "robocup-testing"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [

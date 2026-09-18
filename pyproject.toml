@@ -1,5 +1,5 @@
 [project]
-name = "simulated-robot-application"
+name = "robocup-testing"
 version = "0.1.0"
 description = "A collection of robotics capabilities, one folder per skill"
 readme = "README.md"

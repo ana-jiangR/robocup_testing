@@ -1,4 +1,4 @@
-# simulatedRobotApplication
+# robocup-testing
 
 A collection of robotics capabilities — **one folder per skill** — built as a
 RoboCup proof of concept. Everything reports positions in **metres, in field
