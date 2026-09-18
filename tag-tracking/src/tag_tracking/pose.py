@@ -73,8 +73,10 @@ def tag_field_pose(
     # express it in the field frame, and measure its angle about the field normal.
     pose_R = np.asarray(detection.pose_R, dtype=np.float64).reshape(3, 3)
     forward_cam = pose_R @ TAG_VISUAL_RIGHT
-    vx, vy, _ = transform.direction_to_field(forward_cam)[0]
-    theta = float(np.degrees(np.arctan2(vy, vx)) + heading_offset_deg)
+    # dx, dy are the in-plane components of the direction the tag FACES -- not a
+    # velocity. Nothing here tracks motion between frames.
+    dx, dy, _ = transform.direction_to_field(forward_cam)[0]
+    theta = float(np.degrees(np.arctan2(dy, dx)) + heading_offset_deg)
     theta = (theta + 180.0) % 360.0 - 180.0  # wrap to (-180, 180]
 
     return TagFieldPose(
