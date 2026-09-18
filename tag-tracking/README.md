@@ -86,18 +86,28 @@ You should see one window, camera on the left and a plan view on the right:
   labelled `(0,0) (W,0) (W,H) (0,H)`, a 20 cm grid, and red/green arrows for
   field +X and +Y at the origin corner;
 - your tag **outlined in color** when detected, labelled with its field position;
-- a **plan view** with the tag as a dot, a heading arrow, and a fading trail;
+- a **plan view** with the tag as a solid dot (the filtered track), a small
+  hollow ring (this frame's raw reading), a heading arrow, a white velocity
+  arrow pointing to where it will be in half a second, and a fading trail;
 - a **black strip along the bottom** with one line per tag:
 
 ```
-id  0   x +0.612   y +0.402   th   +3.4   off-plane +1.190   IN
+id  0   x +0.612   y +0.402   th   +3.4   v 0.31 m/s   turn  +12 d/s   off-plane +1.190   IN
 ```
 
 Move the phone left and the `x` falls; move it up and `y` rises; rotate it and
 `th` turns. Carry it past the edge of the green rectangle and the line turns red
 and reads `OUT`, and the plan-view dot goes hollow.
 
-Keys: `q` quit · `g` grid · `t` trails · `r` reset trails · `w` wall/floor ·
+**Velocity comes from a filter, not from differencing frames.** Each tag id
+gets its own small Kalman filter ([`filter.py`](src/tag_tracking/filter.py), on
+top of `vision_core.kalman`, the same core the ball tracker uses). Hold the tag
+still and watch the hollow ring jitter around the solid dot: that jitter,
+divided by the frame time, is what frame-to-frame differencing would call
+velocity. Cover the tag briefly and the dot turns grey and keeps moving on its
+last velocity, marked `coasting`; after half a second unseen it is dropped.
+
+Keys: `q` quit · `g` grid · `t` trails · `r` reset trails and tracks · `w` wall/floor ·
 `[` `]` nudge fx · `s` save intrinsics.
 
 Useful flags:
@@ -107,7 +117,8 @@ uv run track --field 1.2 0.8 --distance 1.8      # field size, and how far out i
 uv run track --mode floor                        # field flat, camera overhead 1.5 m up
 uv run track --list-cameras                      # if it grabs the wrong one
 uv run track --camera 2 --display-width 1300     # pick a camera, shrink the window
-uv run track --print-poses                       # stream id/x/y/theta to stdout
+uv run track --print-poses                       # stream id/x/y/theta/vx/vy/speed to stdout
+uv run track --sigma-a 3                         # filter lags a fast robot? allow harder acceleration (m/s^2)
 ```
 
 ## What `off-plane` is telling you
@@ -370,6 +381,7 @@ overlay lands on the phone exactly, and the plan view agrees with the video.
 ```
 src/tag_tracking/
   pose.py             TagFieldPose, tag_field_pose, TAG_VISUAL_RIGHT -- the tag-shaped bits
+  filter.py           TagFieldState, TagTracker -- one Kalman filter per tag: velocity, coasting
   track.py            live tracking, overlay, plan view
   serve_tag.py        serves the tag to the phone/paper at a known physical size
   selfcheck.py        synthetic end-to-end verification, no hardware
@@ -386,6 +398,7 @@ and, from the shared floor one level up:
   field.py       the swap point: Field, CameraFieldTransform, Synthetic/ReferenceTag
   camera.py      open_camera, list_cameras, lock_camera
   intrinsics.py  load / save / from_fov / hfov_of
+  kalman.py      the linear Kalman filter both trackers build on: gate, Joseph update, angle wrap
   charuco.py     *measure* the camera matrix -- ChArUco board calibration + its digital self-test
   planview.py    draw_field on the video, PlanView beside it
 ../calib/        intrinsics.json (press 's', or calibrate-camera) and

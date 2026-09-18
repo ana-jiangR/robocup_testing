@@ -5,7 +5,11 @@
     uv run track --calibrate-live        # real webcam: calibrate from reference tags, then track
 
 Shows the camera feed with the virtual field drawn on it, a top-down plan view,
-and each tag's position in field coordinates. The field is not real: it is
+and each tag's position, heading and velocity in field coordinates. Velocity
+comes from a per-tag Kalman filter (filter.py); the plan view draws the raw
+per-frame reading as a small hollow ring and the filtered track as the solid
+dot, with a white arrow showing where it will be in half a second, so the two
+can be compared live. The field is not real: it is
 whatever vision_core/field.py says it is -- and with --synthetic-camera, neither
 is the camera feed; a fake, moving tag on a fake field is calibrated and
 tracked live, with no hardware at all, through this exact same window.
@@ -16,7 +20,7 @@ calibrate-field run or saved calib/field_pose.json required first.
 
 Keys:
     q / Esc  quit           g  grid on/off          t  trails on/off
-    [ / ]    fx -/+ 2%      w  wall / floor         r  reset trails
+    [ / ]    fx -/+ 2%      w  wall / floor         r  reset trails and tracks
     s        save intrinsics to calib/intrinsics.json
 """
 
@@ -50,9 +54,12 @@ from .calibrate_field import (
     default_field_layout,
     field_pose_path,
 )
+from .filter import SPEED_EPS, TagFieldState, TagTracker
 from .pose import TagFieldPose, tag_field_pose
 
 TRAIL_LEN = 90
+GHOST_COLOR = (120, 120, 120)  # coasting: not actually seen this frame
+VELOCITY_COLOR = (255, 255, 255)
 
 
 @contextlib.contextmanager
@@ -109,12 +116,14 @@ def draw_tag_marks(frame: np.ndarray, det, pose: TagFieldPose, color) -> None:
 
 def draw_plan(
     plan: PlanView,
-    poses: list[TagFieldPose],
+    states: list[TagFieldState],
+    raw: list[TagFieldPose],
     trails: dict[int, deque],
     transform: CameraFieldTransform,
     show_trails: bool,
 ) -> np.ndarray:
-    """Plan view with one dot per tag, carrying a heading arrow."""
+    """Plan view: raw reading as a hollow ring, filtered track as the solid dot
+    with a heading arrow and a velocity arrow."""
     panel = plan.base()
     plan.draw_camera(panel, transform)
 
@@ -122,22 +131,31 @@ def draw_plan(
         for tid, trail in trails.items():
             plan.draw_trail(panel, trail, color_for(tid))
 
-    for pose in poses:
-        color = color_for(pose.tag_id)
+    for pose in raw:
         p = plan.to_px(pose.x, pose.y)
+        if plan.on_panel(p):
+            cv2.circle(panel, p, 4, color_for(pose.tag_id), 1, cv2.LINE_AA)
+
+    for s in states:
+        color = color_for(s.tag_id) if s.visible else GHOST_COLOR
+        p = plan.to_px(s.x, s.y)
         if not plan.on_panel(p):
             continue  # off the panel entirely
         # Heading arrow, 12 cm long, in field coords.
-        plan.draw_arrow(panel, pose.x, pose.y, pose.theta_deg, 0.12, color)
-        cv2.circle(panel, p, 7, color, -1 if pose.inside else 2, cv2.LINE_AA)
-        cv2.putText(panel, str(pose.tag_id), (p[0] + 9, p[1] - 9),
+        plan.draw_arrow(panel, s.x, s.y, s.theta_deg, 0.12, color)
+        if s.speed > SPEED_EPS:
+            # Velocity arrow: where the filter says the tag will be in 0.5 s.
+            plan.draw_arrow(panel, s.x, s.y, s.direction_deg, 0.5 * s.speed,
+                            VELOCITY_COLOR, 1)
+        cv2.circle(panel, p, 7, color, -1 if s.inside else 2, cv2.LINE_AA)
+        cv2.putText(panel, str(s.tag_id), (p[0] + 9, p[1] - 9),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.44, color, 1, cv2.LINE_AA)
     return panel
 
 
 def draw_readout(
     frame: np.ndarray,
-    poses: list[TagFieldPose],
+    states: list[TagFieldState],
     transform: CameraFieldTransform,
     K: np.ndarray,
     tag_size: float,
@@ -157,25 +175,26 @@ def draw_readout(
 
     # A solid strip behind the numbers: a text halo turns to mush over a busy
     # camera image, and these are the numbers the whole exercise is about.
-    n = max(len(poses), 1)
+    n = max(len(states), 1)
     strip_h = 20 + 24 * n
     cv2.rectangle(frame, (0, h - strip_h), (w, h), (0, 0, 0), -1)
 
-    if not poses:
+    if not states:
         cv2.putText(frame, "no tags detected", (10, h - 14),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.58, (140, 140, 210), 1, cv2.LINE_AA)
         return
 
     y = h - strip_h + 28
-    for pose in sorted(poses, key=lambda p: p.tag_id):
-        color = color_for(pose.tag_id)
-        state = "IN " if pose.inside else "OUT"
+    for s in states:
+        color = color_for(s.tag_id) if s.visible else GHOST_COLOR
+        where = "IN " if s.inside else "OUT"
         line = (
-            f"id {pose.tag_id:2d}   x {pose.x:+6.3f}   y {pose.y:+6.3f}   "
-            f"th {pose.theta_deg:+7.1f}   off-plane {pose.off_plane_m:+6.3f}   {state}"
+            f"id {s.tag_id:2d}   x {s.x:+6.3f}   y {s.y:+6.3f}   th {s.theta_deg:+7.1f}   "
+            f"v {s.speed:4.2f} m/s   turn {s.omega_deg:+5.0f} d/s   "
+            f"off-plane {s.off_plane_m:+6.3f}   {where}{'' if s.visible else '  coasting'}"
         )
         cv2.putText(frame, line, (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.56,
-                    color if pose.inside else OUT_COLOR, 1, cv2.LINE_AA)
+                    color if s.inside else OUT_COLOR, 1, cv2.LINE_AA)
         y += 24
 
 
@@ -237,7 +256,13 @@ def main() -> None:
     ap.add_argument("--display-width", type=int, default=1600,
                     help="shrink the window if the composite is wider than this")
     ap.add_argument("--print-poses", action="store_true",
-                    help="also stream (id, x, y, theta) to stdout")
+                    help="also stream (id, x, y, theta, vx, vy, speed) to stdout, "
+                         "one line per tracked tag per frame")
+    ap.add_argument("--sigma-a", type=float, default=1.0,
+                    help="filter process noise: how hard a robot may accelerate, "
+                         "m/s^2. Raise it if the track lags behind a fast robot")
+    ap.add_argument("--sigma-alpha", type=float, default=180.0,
+                    help="filter process noise for turning, deg/s^2")
     ap.add_argument("--field-pose", type=str, default=None,
                     help="field pose file to load, or to save to with --calibrate-live "
                          "(default calib/field_pose.json at the repo root -- see calibrate-field)")
@@ -353,6 +378,7 @@ def main() -> None:
 
     show_grid, show_trails = True, True
     trails: dict[int, deque] = defaultdict(lambda: deque(maxlen=TRAIL_LEN))
+    tracker = TagTracker(field, sigma_a=args.sigma_a, sigma_alpha_deg=args.sigma_alpha)
     plan = PlanView(field, height=h, mode=mode)
     fps, last_t = 0.0, time.perf_counter()
 
@@ -377,6 +403,13 @@ def main() -> None:
             if not ok:
                 print("camera stopped returning frames")
                 break
+        # dt is measured, not assumed: the filter scales every velocity by it,
+        # and a webcam's real frame time is neither 1/30 nor steady.
+        now = time.perf_counter()
+        dt = now - last_t
+        last_t = now
+        fps = 0.9 * fps + 0.1 / max(dt, 1e-6)
+
         if undistort_maps is not None:
             frame = cv2.remap(frame, *undistort_maps, cv2.INTER_LINEAR)
         grey = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
@@ -388,28 +421,28 @@ def main() -> None:
         poses = [
             tag_field_pose(d, transform, field, args.heading_offset) for d in dets
         ]
+        states = tracker.update(poses, dt)
 
         draw_field(frame, field, transform, K, show_grid)
         for d, pose in zip(dets, poses):
             draw_tag_marks(frame, d, pose, color_for(pose.tag_id))
-            trails[pose.tag_id].append((pose.x, pose.y))
-        draw_readout(frame, poses, transform, K, args.tag_size, intr_source, fps)
+        for s in states:
+            if s.visible:
+                trails[s.tag_id].append((s.x, s.y))
+        draw_readout(frame, states, transform, K, args.tag_size, intr_source, fps)
 
         if args.print_poses:
-            for p in sorted(poses, key=lambda p: p.tag_id):
-                print(f"{p.tag_id}\t{p.x:.4f}\t{p.y:.4f}\t{p.theta_deg:.2f}", flush=True)
+            for s in states:
+                print(f"{s.tag_id}\t{s.x:.4f}\t{s.y:.4f}\t{s.theta_deg:.2f}\t"
+                      f"{s.vx:+.3f}\t{s.vy:+.3f}\t{s.speed:.3f}", flush=True)
 
-        panel = draw_plan(plan, poses, trails, transform, show_trails)
+        panel = draw_plan(plan, states, poses, trails, transform, show_trails)
         composite = np.hstack([frame, panel])
         if composite.shape[1] > args.display_width:
             k = args.display_width / composite.shape[1]
             composite = cv2.resize(composite, None, fx=k, fy=k,
                                    interpolation=cv2.INTER_AREA)
         cv2.imshow(win, composite)
-
-        now = time.perf_counter()
-        fps = 0.9 * fps + 0.1 / max(now - last_t, 1e-6)
-        last_t = now
 
         key = cv2.waitKey(1) & 0xFF
         if key in (ord("q"), 27):
@@ -420,6 +453,7 @@ def main() -> None:
             show_trails = not show_trails
         elif key == ord("r"):
             trails.clear()
+            tracker.reset()
         elif key in (ord("["), ord("]")):
             K = K.copy()
             K[0, 0] *= 0.98 if key == ord("[") else 1.02
@@ -438,6 +472,7 @@ def main() -> None:
                 transform = build_transform(args, field, mode)
                 plan = PlanView(field, height=h, mode=mode)
                 trails.clear()
+                tracker.reset()  # positions jump with the transform; old velocities are junk
                 print(f"transform: {transform.source}")
         elif key == ord("s"):
             if sim_cam is not None:
