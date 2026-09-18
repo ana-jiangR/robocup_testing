@@ -12,20 +12,37 @@ the lock is opt-in rather than the default.
 
 from __future__ import annotations
 
+import sys
+
 import cv2
 
 #: OpenCV's DSHOW backend wants 0.25 for "manual exposure" and 0.75 for "auto".
-#: These are not documented constants, they are what the backend does.
+#: These are not documented constants, they are what the backend does. Only
+#: meaningful on Windows/DSHOW -- lock_camera() is a no-op in effect elsewhere.
 _DSHOW_EXPOSURE_MANUAL = 0.25
 _DSHOW_EXPOSURE_AUTO = 0.75
 
-_BACKENDS = ((cv2.CAP_DSHOW, "DSHOW"), (cv2.CAP_MSMF, "MSMF"), (cv2.CAP_ANY, "ANY"))
+
+def _backends() -> list[tuple[int, str]]:
+    """Backends to try, in a sensible order for the OS actually running this.
+
+    DirectShow/MSMF are Windows-only; trying them elsewhere just wastes time
+    falling through to CAP_ANY, which does not always resolve to a working
+    backend on its own -- macOS in particular needs AVFoundation named
+    explicitly, or camera access can fail silently before the OS even gets to
+    prompt for permission.
+    """
+    if sys.platform == "darwin":
+        return [(cv2.CAP_AVFOUNDATION, "AVFoundation"), (cv2.CAP_ANY, "ANY")]
+    if sys.platform.startswith("win"):
+        return [(cv2.CAP_DSHOW, "DSHOW"), (cv2.CAP_MSMF, "MSMF"), (cv2.CAP_ANY, "ANY")]
+    return [(cv2.CAP_V4L2, "V4L2"), (cv2.CAP_ANY, "ANY")]
 
 
 def open_camera(index: int, width: int, height: int) -> cv2.VideoCapture:
-    """Open a camera, preferring DirectShow on Windows (MSMF is slow to start)."""
+    """Open a camera, trying backends in an OS-appropriate order."""
     last = None
-    for api, name in _BACKENDS:
+    for api, name in _backends():
         cap = cv2.VideoCapture(index, api)
         if cap.isOpened():
             cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
@@ -38,16 +55,23 @@ def open_camera(index: int, width: int, height: int) -> cv2.VideoCapture:
                 return cap
             last = f"{name} opened but returned no frame"
         cap.release()
+    hint = (
+        "check System Settings > Privacy & Security > Camera and make sure your "
+        "terminal app is allowed"
+        if sys.platform == "darwin" else
+        "check Windows camera privacy settings"
+    )
     raise SystemExit(
         f"could not open camera {index} ({last or 'no backend worked'}).\n"
-        f"Try --list-cameras, close Teams/Zoom, or check Windows camera privacy settings."
+        f"Try --list-cameras, close Teams/Zoom or other apps using the camera, or {hint}."
     )
 
 
 def list_cameras(count: int = 5) -> None:
     print(f"probing camera indices 0-{count - 1} ...")
+    api, _name = _backends()[0]
     for i in range(count):
-        cap = cv2.VideoCapture(i, cv2.CAP_DSHOW)
+        cap = cv2.VideoCapture(i, api)
         if cap.isOpened():
             ok, frame = cap.read()
             if ok:

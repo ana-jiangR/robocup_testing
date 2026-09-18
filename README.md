@@ -17,7 +17,7 @@ And the floor a skill stands on, which is **not** itself a skill:
 | | |
 | --- | --- |
 | [`vision-core/`](vision-core/) | Field geometry, the camera↔field transform, intrinsics, camera control, drawing |
-| [`calib/`](calib/) | `intrinsics.json` — the **camera's** calibration, shared by every skill |
+| [`calib/`](calib/) | `intrinsics.json` / `field_pose.json` — the **camera's** and **field's** calibration, shared by every skill |
 
 ## Quick start
 
@@ -27,11 +27,71 @@ uv sync                        # one lockfile, one .venv, whole workspace
 uv run selfcheck               # prove the geometry, no camera needed
 uv run serve-tag               # put a sized AprilTag on your phone
 uv run track --tag-size 0.080  # track it
+
+uv run track --synthetic-camera   # or: watch the whole pipeline work with no hardware at all
 ```
+
+Turning the made-up field into a real, measured one is a one-time calibration
+step — `uv run calibrate-camera` and `uv run calibrate-field`, or
+`uv run track --calibrate-live` to do both in one session. See
+[`tag-tracking`'s README](tag-tracking/#one-time-calibration-making-it-real).
 
 Every command works from the repo root. Each skill also has its own
 `pyproject.toml`, entry points and README, so it still reads — and installs —
 standalone.
+
+## Command reference
+
+**No hardware needed:**
+
+| Command | What it does |
+| --- | --- |
+| `uv run selfcheck` | Proves the field math is correct |
+| `uv run calibrate-camera --synthetic` | Proves lens-calibration math is correct |
+| `uv run calibrate-field --synthetic` | Proves field-calibration math is correct |
+| `uv run track --synthetic-camera` | Watch the whole pipeline work on a fake field |
+
+**Prep — phone or printer:**
+
+| Command | What it does |
+| --- | --- |
+| `uv run serve-tag` | One AprilTag on your phone, sized via the bank-card trick |
+| `uv run serve-tag --field-sheet out.png` | All 4 reference tags laid out on one printable page |
+
+**Calibration — real webcam:**
+
+| Command | What it does |
+| --- | --- |
+| `uv run calibrate-camera` | Measures the lens: wave a printed board at the webcam |
+| `uv run calibrate-field` | Measures the field position: point the webcam at your 4 tags |
+| `uv run track --calibrate-live` | Does both of the above, then starts tracking right away |
+
+**Tracking:**
+
+| Command | What it does |
+| --- | --- |
+| `uv run track` | Normal run — auto-loads whatever's already calibrated |
+
+### Flags that matter
+
+`--field` and `--tag-size` are what make the numbers mean real metres —
+always pass your **ruler-measured** sizes, not the target you printed for.
+Both default to a plausible demo size, so a bare command still runs, just
+against the wrong physical size until you correct it.
+
+| Flag | Meaning | Default | Used by |
+| --- | --- | --- | --- |
+| `--field W H` | Real field size, in metres | `1.2 0.8` | `calibrate-field`, `track` (incl. `--calibrate-live`, `--synthetic-camera`) |
+| `--tag-size` | Real black-square tag size, in metres | `0.080` | `track` (incl. `--calibrate-live`, `--synthetic-camera`) |
+| `--camera N` | Which webcam index to use | `0` | `calibrate-camera`, `calibrate-field`, `track` |
+| `--out PATH` | Where to save the calibration result | `calib/...` at repo root | `calibrate-camera`, `calibrate-field` |
+| `--field-pose PATH` | Field calibration file to load/save | `calib/field_pose.json` | `track` (incl. `--calibrate-live`) |
+| `--layout ID:X,Y ...` | Custom reference-tag positions, overrides the default 4 corners | corners of `--field` | `calibrate-field` |
+| `--tag-id` / `--size-mm` | Which tag id, and initial size in mm on the phone page | `0` / `80` | `serve-tag` |
+| `--print-poses` | Also stream `id x y theta` to the terminal | off | `track` |
+
+Full per-command flag lists: `uv run <command> --help`, or see
+[`tag-tracking`'s README](tag-tracking/) for the calibration workflow in detail.
 
 ## Not using uv?
 
@@ -91,3 +151,5 @@ lies flat. `floor` is the physically meaningful one and assumes the camera is
 **hung over the field centre looking straight down**, 1.5 m up — set
 `--cam-height` to your real mounting height. `wall` is easier to demo by hand.
 The maths works at any camera pose; both modes are covered by `selfcheck`.
+
+

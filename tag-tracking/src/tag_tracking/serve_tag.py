@@ -7,9 +7,15 @@ ISO/IEC 7810 ID-1 -- 85.60 x 53.98 mm, the same in every wallet in the world.
 
     uv run serve-tag
     uv run serve-tag --tag-id 7 --size-mm 80
+    uv run serve-tag --field-sheet field.png            # 4 reference tags on one printable A4 sheet
 
 The size the page reports is the edge-to-edge width of the BLACK SQUARE, which
 is exactly what the detector means by tag size. Pass it to the tracker.
+
+--field-sheet is a different tool for a different job: instead of one tag
+sized via the phone/bank-card trick, it lays out all 4 reference tags at the
+corners of a field rectangle on one page, for when the whole field fits on a
+single sheet of paper. No phone or wifi involved -- print it and measure it.
 """
 
 from __future__ import annotations
@@ -35,6 +41,77 @@ def tag_png_base64(tag_id: int, px_per_module: int = 64) -> str:
     if not ok:
         raise RuntimeError("failed to encode tag PNG")
     return base64.b64encode(buf.tobytes()).decode("ascii")
+
+
+def generate_field_sheet(
+    path: str,
+    sheet_mm: tuple[float, float] = (297.0, 210.0),
+    field_mm: tuple[float, float] = (240.0, 150.0),
+    tag_mm: float = 20.0,
+    tag_ids: tuple[int, int, int, int] = (0, 1, 2, 3),
+    px_per_mm: float = 8.0,
+) -> None:
+    """One printable sheet with 4 reference AprilTags positioned at the
+    corners of a field rectangle, instead of 4 separate tags you have to cut
+    out and tape down by hand with a ruler -- print this on one page (e.g. A4)
+    and the reference layout is already correct, up to print scaling.
+
+    Corner order matches calibrate_field.default_field_layout:
+    id 0 -> (0,0), id 1 -> (W,0), id 2 -> (W,H), id 3 -> (0,H). Each tag's
+    CENTRE lands on its corner, so it straddles the field boundary by half
+    its own width -- that is what ReferenceTagFieldTransform expects (it
+    matches a detected tag's centre pixel to the (x, y) you give it).
+
+    `sheet_mm`/`field_mm`/`tag_mm` are targets, not guarantees: printers and
+    "fit to page" do not reliably turn a pixel count into an exact physical
+    size. Print it, then MEASURE the printed field rectangle and one tag with
+    a ruler, and use those numbers for --field/--tag-size -- same as every
+    other physical measurement in this project.
+    """
+    sheet_w_mm, sheet_h_mm = sheet_mm
+    field_w_mm, field_h_mm = field_mm
+    margin_x = (sheet_w_mm - field_w_mm) / 2.0
+    margin_y = (sheet_h_mm - field_h_mm) / 2.0
+    if margin_x < tag_mm / 2 or margin_y < tag_mm / 2:
+        raise ValueError("field_mm is too close to sheet_mm -- tags would run off the page")
+
+    sheet_w_px = int(round(sheet_w_mm * px_per_mm))
+    sheet_h_px = int(round(sheet_h_mm * px_per_mm))
+    canvas = np.full((sheet_h_px, sheet_w_px), 255, np.uint8)
+
+    def to_px(x_mm: float, y_mm: float) -> tuple[int, int]:
+        return (
+            int(round((margin_x + x_mm) * px_per_mm)),
+            int(round((margin_y + y_mm) * px_per_mm)),
+        )
+
+    corners_mm = [(0.0, 0.0), (field_w_mm, 0.0), (field_w_mm, field_h_mm), (0.0, field_h_mm)]
+    pts = np.array([to_px(*c) for c in corners_mm], np.int32)
+    cv2.polylines(canvas, [pts], True, 180, 2, cv2.LINE_AA)
+
+    d = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_APRILTAG_36H11)
+    tag_px = int(round(tag_mm * px_per_mm))
+    half = tag_px // 2
+    for tag_id, (x_mm, y_mm) in zip(tag_ids, corners_mm):
+        tag_img = cv2.aruco.generateImageMarker(d, tag_id, tag_px, 1)
+        cx, cy = to_px(x_mm, y_mm)
+        x0, y0 = cx - half, cy - half
+        canvas[y0:y0 + tag_px, x0:x0 + tag_px] = tag_img
+        cv2.putText(canvas, f"id {tag_id}", (x0, max(y0 - 8, 14)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, 0, 1, cv2.LINE_AA)
+
+    caption = (
+        f"target: field {field_w_mm:.0f}x{field_h_mm:.0f} mm, tag {tag_mm:.0f} mm  --  "
+        f"MEASURE both with a ruler after printing and use the measured numbers"
+    )
+    cv2.putText(canvas, caption, (int(margin_x * px_per_mm * 0.25), sheet_h_px - 12),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.42, 0, 1, cv2.LINE_AA)
+
+    cv2.imwrite(path, canvas)
+    print(f"wrote {path}  ({sheet_w_mm:.0f}x{sheet_h_mm:.0f} mm sheet, "
+          f"field target {field_w_mm:.0f}x{field_h_mm:.0f} mm, tag target {tag_mm:.0f} mm)")
+    print("Print at '100%' / 'actual size' if offered, otherwise 'fit to page' on "
+          "a matching paper size -- either way, measure the result with a ruler.")
 
 
 def lan_ip() -> str:
@@ -236,7 +313,26 @@ def main() -> None:
         metavar="PATH",
         help="also write the tag as a PNG, if you would rather print it",
     )
+    ap.add_argument(
+        "--field-sheet", metavar="PATH",
+        help="write ONE printable sheet with 4 reference tags (ids 0-3) positioned "
+             "at the corners of a field rectangle -- for when the whole field fits "
+             "on one page (e.g. A4). Exits without starting the phone server.",
+    )
+    ap.add_argument("--sheet-mm", type=float, nargs=2, metavar=("W", "H"), default=[297.0, 210.0],
+                     help="--field-sheet: paper size in mm (default 297 210, A4 landscape)")
+    ap.add_argument("--field-mm", type=float, nargs=2, metavar=("W", "H"), default=[240.0, 150.0],
+                     help="--field-sheet: target field rectangle size in mm (default 240 150)")
+    ap.add_argument("--tag-mm", type=float, default=20.0,
+                     help="--field-sheet: target tag size in mm (default 20)")
     args = ap.parse_args()
+
+    if args.field_sheet:
+        generate_field_sheet(
+            args.field_sheet, sheet_mm=tuple(args.sheet_mm),
+            field_mm=tuple(args.field_mm), tag_mm=args.tag_mm,
+        )
+        return
 
     if args.save_png:
         d = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_APRILTAG_36H11)

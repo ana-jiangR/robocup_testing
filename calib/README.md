@@ -7,7 +7,8 @@ up.
 
 | File | Made by | What it is |
 | --- | --- | --- |
-| `intrinsics.json` | `s` in either tracker | The camera matrix: how zoomed-in the lens is. Stores the resolution it was measured at, and is ignored on load if that does not match. |
+| `intrinsics.json` | `s` in `track`, or `calibrate-camera` | The camera matrix: how zoomed-in the lens is, and (from `calibrate-camera`) real lens distortion coefficients. Stores the resolution it was measured at, and is ignored on load if that does not match. |
+| `field_pose.json` | `calibrate-field`, or `track --calibrate-live` | Where the field is, relative to the camera -- an `R`/`t` solved from four reference AprilTags. `track` loads it automatically in place of the made-up field. |
 
 Committed, because this team shares one rig. Later skills add their own files
 here — ball tracking will drop a `ball_color.json` alongside it.

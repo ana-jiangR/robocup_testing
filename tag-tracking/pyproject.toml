@@ -18,6 +18,8 @@ dependencies = [
 selfcheck = "tag_tracking.selfcheck:main"
 serve-tag = "tag_tracking.serve_tag:main"
 track = "tag_tracking.track:main"
+calibrate-camera = "tag_tracking.calibrate_camera:main"
+calibrate-field = "tag_tracking.calibrate_field:main"
 
 [tool.uv.sources]
 vision-core = { workspace = true }
