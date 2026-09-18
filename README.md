@@ -8,16 +8,18 @@ coordinates**, from a single webcam.
 
 | Skill | What it tracks | Output |
 | --- | --- | --- |
-| [`tag-tracking/`](tag-tracking/) | AprilTags on a phone or a robot shell | `TagFieldPose` — `x, y, theta_deg` |
+| [`tag-tracking/`](tag-tracking/) | AprilTags on a phone or a robot shell | `TagFieldState` — position, heading, velocity, turn rate |
+| [`ball-tracking/`](ball-tracking/) | A colored ball, by its hue rather than a marker | `BallFieldState` — position, height, velocity, grounded |
 
-Color-based ball tracking is the next skill, and is not in this branch yet.
+Both report **filtered** motion, not frame-to-frame differences. Each keeps its
+own physics and shares one small Kalman filter core in `vision-core`.
 
 And the floor a skill stands on, which is **not** itself a skill:
 
 | | |
 | --- | --- |
 | [`vision-core/`](vision-core/) | Field geometry, the camera↔field transform, intrinsics, camera control, drawing |
-| [`calib/`](calib/) | `intrinsics.json` / `field_pose.json` — the **camera's** and **field's** calibration, shared by every skill |
+| [`calib/`](calib/) | `intrinsics.json`, `field_pose.json`, `ball_color.json` — measured calibration, shared by every skill |
 
 ## Quick start
 
@@ -29,6 +31,14 @@ uv run serve-tag               # put a sized AprilTag on your phone
 uv run track --tag-size 0.080  # track it
 
 uv run track --synthetic-camera   # or: watch the whole pipeline work with no hardware at all
+```
+
+For the ball, the color profile is the one step with no default — nothing can
+find a ball it has never been shown:
+
+```powershell
+uv run calibrate-ball --profile mine --radius-mm 40   # drag a box over YOUR ball, press s
+uv run track-ball --ball-profile mine --cam-height 1.5
 ```
 
 Turning the made-up field into a real, measured one is a one-time calibration
@@ -57,20 +67,30 @@ standalone.
 | --- | --- |
 | `uv run serve-tag` | One AprilTag on your phone, sized via the bank-card trick |
 | `uv run serve-tag --field-sheet out.png` | All 4 reference tags laid out on one printable page |
+| `uv run calibrate-camera --save-board-png board.png` | The ChArUco board to print, for the lens step |
 
 **Calibration — real webcam:**
 
-| Command | What it does |
-| --- | --- |
-| `uv run calibrate-camera` | Measures the lens: wave a printed board at the webcam |
-| `uv run calibrate-field` | Measures the field position: point the webcam at your 4 tags |
-| `uv run track --calibrate-live` | Does both of the above, then starts tracking right away |
+| Command | What it does | Writes |
+| --- | --- | --- |
+| `uv run calibrate-camera` | Measures the lens: wave a printed board at the webcam | `calib/intrinsics.json` |
+| `uv run calibrate-field` | Measures the field position: point the webcam at your 4 tags | `calib/field_pose.json` |
+| `uv run calibrate-ball` | Measures the ball's color: drag a box over it | `calib/ball_color.json` |
+| `uv run track --calibrate-live` | Lens + field in one session, then starts tracking | `calib/field_pose.json` |
+
+All three are optional to *start*. Without them the software assumes a 60° lens
+and believes whatever `--cam-height` you type. Positions still move correctly;
+they just aren't measured. The ball's color profile is the exception — there is
+no default ball, so `calibrate-ball` is required before `track-ball` runs.
 
 **Tracking:**
 
 | Command | What it does |
 | --- | --- |
-| `uv run track` | Normal run — auto-loads whatever's already calibrated |
+| `uv run track` | Tags — auto-loads whatever's already calibrated |
+| `uv run track-ball --ball-profile NAME` | Ball — same, and needs a color profile |
+
+One webcam serves one program, so run these in separate sessions, not at once.
 
 ### Flags that matter
 
@@ -88,10 +108,20 @@ against the wrong physical size until you correct it.
 | `--field-pose PATH` | Field calibration file to load/save | `calib/field_pose.json` | `track` (incl. `--calibrate-live`) |
 | `--layout ID:X,Y ...` | Custom reference-tag positions, overrides the default 4 corners | corners of `--field` | `calibrate-field` |
 | `--tag-id` / `--size-mm` | Which tag id, and initial size in mm on the phone page | `0` / `80` | `serve-tag` |
-| `--print-poses` | Also stream `id x y theta` to the terminal | off | `track` |
+| `--ball-profile` | Which named color profile to track | `test` | `track-ball` |
+| `--radius-mm` | The ball's real **radius**, stored in the profile | `20` | `calibrate-ball` |
+| `--cam-height` | Camera height above the field, metres — ignored once `field_pose.json` exists | `1.5` | `track`, `track-ball` |
+| `--print-poses` / `--print-states` | Stream the numbers to the terminal | off | `track` / `track-ball` |
 
 Full per-command flag lists: `uv run <command> --help`, or see
 [`tag-tracking`'s README](tag-tracking/) for the calibration workflow in detail.
+
+### Keys, in every window
+
+`q` or `Esc` quits, `s` saves. The rest are per-tool and listed in each README.
+Keys only reach the **video window**, so click it first — and if letters do
+nothing while the mouse still works, your input method is swallowing them.
+Switch it to English, or press `Esc`, which no IME intercepts.
 
 ## Not using uv?
 
@@ -110,6 +140,7 @@ py -3.12 -m venv .venv                  # 3.12 or 3.13, not 3.14 — see below
 .venv\Scripts\activate
 pip install -e ./vision-core            # THIS ORDER MATTERS
 pip install -e ./tag-tracking
+pip install -e ./ball-tracking
 ```
 
 1. **Python 3.12 or 3.13 — not 3.14.** `pupil-apriltags` ships prebuilt wheels

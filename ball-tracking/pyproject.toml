@@ -1,0 +1,22 @@
+[project]
+name = "ball-tracking"
+version = "0.1.0"
+description = "Color-based ball tracking: position, velocity and airborne detection in field coordinates"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "numpy>=2.5.3",
+    "opencv-python>=5.0.0.93",
+    "vision-core",
+]
+
+[project.scripts]
+calibrate-ball = "ball_tracking.ball_color:main"
+track-ball = "ball_tracking.track_ball:main"
+
+[tool.uv.sources]
+vision-core = { workspace = true }
+
+[build-system]
+requires = ["uv_build>=0.12.12,<0.13.0"]
+build-backend = "uv_build"
