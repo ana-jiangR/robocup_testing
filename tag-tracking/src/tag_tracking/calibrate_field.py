@@ -82,11 +82,13 @@ def calibrate_field(
     dist: np.ndarray | None = None,
     min_frames: int = MIN_FRAMES,
     max_frames: int = MAX_LIVE_FRAMES,
+    tag_size: float | None = None,
 ) -> FieldCalibrationResult:
     """Solve the field pose from several frames of the reference tags and
     average, instead of trusting one noisy solvePnP call.
 
-    Detection only needs det.center (pixel coordinates); solvePnP inside
+    Pass `tag_size` (metres) so each solve uses all four corners of every tag
+    rather than just the centres. solvePnP inside
     ReferenceTagFieldTransform.from_detections applies `dist` itself, so the
     frames do not need to be undistorted first.
     """
@@ -101,7 +103,7 @@ def calibrate_field(
         grey = frame if frame.ndim == 2 else cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         dets = detector.detect(grey)
         try:
-            t = ReferenceTagFieldTransform.from_detections(dets, layout, K, dist)
+            t = ReferenceTagFieldTransform.from_detections(dets, layout, K, dist, tag_size)
         except LookupError:
             continue
         Rs.append(t.R)
@@ -211,7 +213,8 @@ def _run_synthetic(args, field: Field, layout: dict[int, tuple[float, float]]):
     print(f"Synthetic field -- ground truth: {truth.source}\n")
 
     frames = (cam.read() for _ in range(20))
-    result = calibrate_field(frames, layout, K, min_frames=args.min_frames)
+    result = calibrate_field(frames, layout, K, min_frames=args.min_frames,
+                             tag_size=args.tag_size)
     print(f"{result.transform.source}")
     print(
         f"agreement across frames: rotation spread {result.rotation_spread_deg:.3f} deg, "
@@ -262,7 +265,8 @@ def _run_live(args, field: Field, layout: dict[int, tuple[float, float]]):
         cap.release()
         cv2.destroyAllWindows()
 
-    result = calibrate_field(frames, layout, K, dist, min_frames=args.min_frames)
+    result = calibrate_field(frames, layout, K, dist, min_frames=args.min_frames,
+                             tag_size=args.tag_size)
     print(f"\n{result.transform.source}")
     print(
         f"agreement across frames: rotation spread {result.rotation_spread_deg:.3f} deg, "

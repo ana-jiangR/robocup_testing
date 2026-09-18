@@ -36,7 +36,9 @@ def _run_synthetic(args):
     )
     shape = (args.height, args.width)
     K_truth = intr.from_fov(args.width, args.height, 60.0)
-    dist_truth = np.array([0.05, -0.03, 0.001, -0.0005, 0.01])
+    # k3 is 0 because calibrate_intrinsics pins it (fix_k3); a non-zero truth
+    # there would just leak into the recovered k2 and muddy the comparison.
+    dist_truth = np.array([0.05, -0.03, 0.001, -0.0005, 0.0])
     cam = SyntheticChArucoCamera(board, K_truth, dist_truth, shape=shape)
 
     print("Synthetic camera -- ground truth:")
@@ -51,7 +53,13 @@ def _run_synthetic(args):
     print(f"rms reprojection error: {result.rms_reproj_px:.3f} px over {result.n_frames} views")
     fx_err_pct = 100 * abs(result.K[0, 0] - K_truth[0, 0]) / K_truth[0, 0]
     cx_err_px = abs(result.K[0, 2] - K_truth[0, 2])
-    print(f"fx error vs ground truth: {fx_err_pct:.2f}%   cx error: {cx_err_px:.1f} px")
+    k1_err = abs(result.dist[0] - dist_truth[0])
+    print(f"fx error vs ground truth: {fx_err_pct:.2f}%   cx error: {cx_err_px:.1f} px   "
+          f"k1 error: {k1_err:.3f}")
+    ok = fx_err_pct < 2.0 and k1_err < 0.02
+    print(f"self-test: {'PASS' if ok else 'FAIL'}")
+    if not ok:
+        raise SystemExit(1)
     return result, args.out
 
 
@@ -141,6 +149,7 @@ def main() -> None:
         img = board.generateImage((1600, int(round(1600 * sy / sx))), marginSize=40)
         cv2.imwrite(args.save_board_png, img)
         print(f"wrote {args.save_board_png}")
+        return
 
     result, out = _run_synthetic(args) if args.synthetic else _run_live(args)
 

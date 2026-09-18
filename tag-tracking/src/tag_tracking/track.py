@@ -68,7 +68,11 @@ def _suppressed_stderr():
     exceptions are unaffected -- this only hides that library's own fprintf
     output.
     """
-    fd = sys.stderr.fileno()
+    try:
+        fd = sys.stderr.fileno()
+    except (AttributeError, OSError, ValueError):
+        yield  # stderr is not a real file (captured / IDE console): nothing to silence
+        return
     saved = os.dup(fd)
     devnull = os.open(os.devnull, os.O_WRONLY)
     try:
@@ -83,6 +87,13 @@ def _suppressed_stderr():
 # --------------------------------------------------------------------------
 # Drawing
 # --------------------------------------------------------------------------
+
+
+def _undistort_maps(K: np.ndarray, dist: np.ndarray, w: int, h: int):
+    """Precomputed remap tables for cv2.remap, or None when there is no distortion."""
+    if not np.any(dist):
+        return None
+    return cv2.initUndistortRectifyMap(K, dist, None, K, (w, h), cv2.CV_16SC2)
 
 
 def draw_tag_marks(frame: np.ndarray, det, pose: TagFieldPose, color) -> None:
@@ -270,7 +281,8 @@ def main() -> None:
 
         print(f"calibrating field pose from {len(layout)} simulated reference tags...")
         calib_frames = [sim_cam.read() for _ in range(20)]
-        result = calibrate_field(calib_frames, layout, K, min_frames=10)
+        result = calibrate_field(calib_frames, layout, K, min_frames=10,
+                                 tag_size=args.tag_size)
         print(f"  {result.transform.source}")
         print(f"  agreement across frames: rotation spread "
               f"{result.rotation_spread_deg:.3f} deg, translation spread "
@@ -312,7 +324,8 @@ def main() -> None:
                 _read_bgr, layout, min_frames=CALIB_MIN_FRAMES,
                 window_name="calibrate-field (live)",
             )
-            result = calibrate_field(calib_frames, layout, K, dist, min_frames=CALIB_MIN_FRAMES)
+            result = calibrate_field(calib_frames, layout, K, dist, min_frames=CALIB_MIN_FRAMES,
+                                     tag_size=args.tag_size)
             print(f"\n{result.transform.source}")
             print(f"agreement across frames: rotation spread "
                   f"{result.rotation_spread_deg:.3f} deg, translation spread "
@@ -350,18 +363,23 @@ def main() -> None:
     win = "virtual field tracking"
     cv2.namedWindow(win, cv2.WINDOW_AUTOSIZE)
 
+    # Undistort the whole frame, not just the grey copy the detector sees:
+    # the overlay is drawn on `frame`, so both must live in the same (pinhole)
+    # pixel space or the outlines drift off the tags towards the edges.
+    # Maps are built once; cv2.undistort rebuilds them every call (~8x slower).
+    undistort_maps = _undistort_maps(K, dist, w, h)
+
     while True:
         if sim_cam is not None:
-            grey = sim_cam.read()
-            frame = cv2.cvtColor(grey, cv2.COLOR_GRAY2BGR)
+            frame = cv2.cvtColor(sim_cam.read(), cv2.COLOR_GRAY2BGR)
         else:
             ok, frame = cap.read()
             if not ok:
                 print("camera stopped returning frames")
                 break
-            grey = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        if np.any(dist):
-            grey = cv2.undistort(grey, K, dist)
+        if undistort_maps is not None:
+            frame = cv2.remap(frame, *undistort_maps, cv2.INTER_LINEAR)
+        grey = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         cam_params = (K[0, 0], K[1, 1], K[0, 2], K[1, 2])
         with _suppressed_stderr():
             dets = detector.detect(grey, estimate_tag_pose=True,
@@ -407,6 +425,7 @@ def main() -> None:
             K[0, 0] *= 0.98 if key == ord("[") else 1.02
             K[1, 1] = K[0, 0]
             intr_source = "hand-tuned"
+            undistort_maps = _undistort_maps(K, dist, w, h)
             print(f"fx {K[0, 0]:.1f}  -> {intr.hfov_of(K, w):.1f} deg HFOV")
         elif key == ord("w"):
             if using_calibrated:
@@ -424,9 +443,12 @@ def main() -> None:
             if sim_cam is not None:
                 print("no real camera to calibrate in --synthetic-camera mode")
             else:
-                path = intr.save(K, w, h, f"{intr_source} (no lens distortion)")
+                # Keep whatever distortion was loaded: saving K alone would
+                # silently zero a calibrate-camera result.
+                path = intr.save(K, w, h, intr_source, dist=dist)
                 print(f"saved {path}")
-                print("(a hand-tuned fx only -- for real lens distortion, run calibrate-camera)")
+                if not np.any(dist):
+                    print("(fx only, no lens distortion -- run calibrate-camera for that)")
 
     if cap is not None:
         cap.release()

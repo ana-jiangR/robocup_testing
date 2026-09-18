@@ -269,33 +269,64 @@ class ReferenceTagFieldTransform(CameraFieldTransform):
         layout: dict[int, tuple[float, float]],
         camera_matrix: np.ndarray,
         dist_coeffs: np.ndarray | None = None,
+        tag_size: float | None = None,
     ) -> ReferenceTagFieldTransform:
+        """`tag_size` (metres, tags lying flat on the field) upgrades the solve
+        from 4 tag centres to all 16 corners. Four coplanar points is the
+        worst case for planar PnP -- viewed near head-on, two tilts fit the
+        centres almost equally well -- and the corners are what the detector
+        localises precisely anyway.
+        """
         import cv2
 
-        obj, img = [], []
-        for det in detections:
-            if det.tag_id in layout:
-                fx, fy = layout[det.tag_id]
-                obj.append([fx, fy, 0.0])
-                img.append(list(det.center))
-        if len(obj) < cls.MIN_TAGS:
+        used = [det for det in detections if det.tag_id in layout]
+        if len(used) < cls.MIN_TAGS:
             raise LookupError(
-                f"saw {len(obj)} reference tags, need {cls.MIN_TAGS} "
+                f"saw {len(used)} reference tags, need {cls.MIN_TAGS} "
                 f"(looking for ids {sorted(layout)})"
             )
         if dist_coeffs is None:
             dist_coeffs = np.zeros(5, np.float64)
+        obj = np.array([[*layout[det.tag_id], 0.0] for det in used], np.float64)
+        img = np.array([det.center for det in used], np.float64)
         ok, rvec, tvec = cv2.solvePnP(
-            np.array(obj, np.float64),
-            np.array(img, np.float64),
-            camera_matrix,
-            dist_coeffs,
-            flags=cv2.SOLVEPNP_ITERATIVE,
+            obj, img, camera_matrix, dist_coeffs, flags=cv2.SOLVEPNP_ITERATIVE
         )
         if not ok:
             raise RuntimeError("solvePnP failed on the reference tags")
+
+        if tag_size is not None:
+            # The layout gives centres only, not how each tag is turned, so
+            # match its corners to the field square by trying every cyclic
+            # order (both windings) against the centre-only pose and keeping
+            # the one that reprojects best. Then re-solve on all corners.
+            half = tag_size / 2.0
+            obj_c, img_c = [], []
+            for det in used:
+                cx, cy = layout[det.tag_id]
+                square = np.array(
+                    [[cx - half, cy - half, 0.0], [cx + half, cy - half, 0.0],
+                     [cx + half, cy + half, 0.0], [cx - half, cy + half, 0.0]]
+                )
+                pix = np.asarray(det.corners, np.float64).reshape(4, 2)
+                best_err, best = np.inf, None
+                for cand in (square, square[::-1]):
+                    for k in range(4):
+                        rolled = np.roll(cand, k, axis=0)
+                        proj, _ = cv2.projectPoints(rolled, rvec, tvec, camera_matrix, dist_coeffs)
+                        err = np.linalg.norm(proj.reshape(4, 2) - pix, axis=1).sum()
+                        if err < best_err:
+                            best_err, best = err, rolled
+                obj_c.extend(best)
+                img_c.extend(pix)
+            ok, rvec, tvec = cv2.solvePnP(
+                np.array(obj_c), np.array(img_c), camera_matrix, dist_coeffs,
+                rvec, tvec, useExtrinsicGuess=True, flags=cv2.SOLVEPNP_ITERATIVE,
+            )
+            if not ok:
+                raise RuntimeError("solvePnP failed on the reference tag corners")
         R, _ = cv2.Rodrigues(rvec)
-        return cls(R, tvec.reshape(3), f"measured from {len(obj)} reference tags")
+        return cls(R, tvec.reshape(3), f"measured from {len(used)} reference tags")
 
     def save(self, path: str | Path) -> None:
         Path(path).write_text(

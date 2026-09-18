@@ -154,11 +154,15 @@ def default_board_poses(board_w: float, board_h: float) -> list[tuple[np.ndarray
 class SyntheticChArucoCamera:
     """Renders a real cv2.aruco.CharucoBoard at a scripted sequence of poses.
 
-    The board is rasterised once at high resolution, then perspective-warped
-    into each frame with linear interpolation. That single warpPerspective is
-    sub-pixel accurate; filling each chessboard square as its own polygon was
-    tried first and fed enough rasterisation bias into cv2.calibrateCamera to
-    fabricate several percent of phantom lens distortion out of nothing.
+    The board is rasterised once at high resolution, perspective-warped into
+    each frame as a pinhole camera would see it, then pushed through the lens
+    distortion as a per-pixel remap. The two steps must stay separate: a
+    homography can only place the board's four corners, it cannot bend the
+    lines between them, so warping straight to the *distorted* corners renders
+    a board that is still straight-lined and calibrates to ~zero distortion no
+    matter what dist_truth says. (Filling each square as its own polygon was
+    tried before that and fabricated phantom distortion from rasterisation
+    bias instead.)
     """
 
     board: "cv2.aruco.CharucoBoard"
@@ -181,6 +185,14 @@ class SyntheticChArucoCamera:
         h_px = max(2, int(round(self.board_size_m[1] * px_per_m)))
         self._pattern = self.board.generateImage((w_px, h_px), marginSize=0)
         self._i = 0
+        # Distorted pixel -> where it samples the pinhole image. Built once.
+        self._distort_map = None
+        if np.any(self.dist_truth):
+            h, w = self.shape
+            xs, ys = np.meshgrid(np.arange(w, dtype=np.float64), np.arange(h, dtype=np.float64))
+            grid = np.stack([xs.ravel(), ys.ravel()], axis=1)[:, None, :]
+            und = cv2.undistortPoints(grid, self.K_truth, self.dist_truth, P=self.K_truth)
+            self._distort_map = und.reshape(h, w, 2).astype(np.float32)
 
     def _render(self, rvec: np.ndarray, tvec: np.ndarray) -> np.ndarray:
         h, w = self.shape
@@ -188,12 +200,14 @@ class SyntheticChArucoCamera:
         src = np.array([[0, 0], [pw - 1, 0], [pw - 1, ph - 1], [0, ph - 1]], np.float32)
         bw, bh = self.board_size_m
         obj = np.array([[0, 0, 0], [bw, 0, 0], [bw, bh, 0], [0, bh, 0]], np.float64)
-        pix, _ = cv2.projectPoints(obj, rvec, tvec, self.K_truth, self.dist_truth)
+        pix, _ = cv2.projectPoints(obj, rvec, tvec, self.K_truth, None)  # pinhole
         dst = pix.reshape(4, 2).astype(np.float32)
         M = cv2.getPerspectiveTransform(src, dst)
         frame = cv2.warpPerspective(
             self._pattern, M, (w, h), flags=cv2.INTER_LINEAR, borderValue=235
         )
+        if self._distort_map is not None:
+            frame = cv2.remap(frame, self._distort_map, None, cv2.INTER_LINEAR, borderValue=235)
         if self.noise_std:
             noise = np.random.normal(0, self.noise_std, frame.shape)
             frame = np.clip(frame.astype(np.float64) + noise, 0, 255).astype(np.uint8)
