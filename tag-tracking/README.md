@@ -12,6 +12,10 @@ one file so that swap costs one subclass and changes nothing downstream.
 [`vision-core`](../vision-core/), ready to be shared with the skills that follow;
 everything below runs from the repo root.
 
+Making that real (measuring the camera and the field instead of inventing them)
+is a one-time calibration step — see [One-time calibration](#one-time-calibration-making-it-real)
+once you have been through steps 0-2 below.
+
 ## Run it in order
 
 ### 0 · Check the maths (no camera, no phone)
@@ -146,7 +150,7 @@ What does *not* cancel, even now:
 - **Absolute scale.** If you tape-measure the phone at 50 cm and the numbers
   disagree, that gap is your `fx` error.
 
-Two cheap upgrades, in order:
+Three upgrades, in order of effort:
 
 1. **Tell it the FOV**: `uv run track --hfov 70` if you know your webcam's spec.
 2. **One-parameter fix, which is most of the benefit.** Hold the phone at a
@@ -155,6 +159,8 @@ Two cheap upgrades, in order:
    which is loaded automatically next run — and shared with the ball tracker,
    since it describes the camera rather than this skill. This directly calibrates `fx` — the parameter that
    actually matters — usually to within a couple of percent.
+3. **A real calibration**, with real lens distortion coefficients, not just
+   `fx` — see the next section.
 
 > One catch worth knowing: **tag-size error and `fx` error are the same error.**
 > Only their product sets the depth. You cannot separate them by looking at one
@@ -167,11 +173,137 @@ tags, the camera pose is solved from their measured image positions against real
 surveyed field coordinates. There is no longer a shared fiction for errors to
 cancel into — intrinsic error becomes real position error, and distortion becomes
 a position-dependent bias that is worst at the frame edges, which is exactly where
-corner reference tags live. Do a proper chessboard calibration then
-(`cv2.calibrateCamera`, ~20 views, and keep the distortion coefficients:
-`ReferenceTagFieldTransform.from_detections` already accepts them).
+corner reference tags live. That is exactly what `calibrate-camera` and
+`calibrate-field`, below, are for.
+
+## One-time calibration: making it real
+
+Two independent, one-time steps. Each is its own command, each saves a file
+at the repo root's `calib/` (shared with every skill, via `vision_core.paths`)
+that `track` picks up automatically from then on. Run neither and nothing
+changes — you get the made-up field exactly as above.
+
+### Camera intrinsics — `calibrate-camera`
+
+Real focal length, principal point, and lens distortion, from a ChArUco board
+(a checkerboard with AprilTag-style markers baked into it, so the same corner
+detector that already ships with OpenCV can find it precisely). The math lives
+in `vision_core.charuco` — it is camera-only and has nothing to do with
+AprilTags, so it belongs in vision-core, same as `intrinsics.py`; this skill
+just supplies the CLI.
+
+```powershell
+uv run calibrate-camera --synthetic          # try it first: a digital board, no camera or board needed
+uv run calibrate-camera --save-board-png board.png   # print this
+uv run calibrate-camera                      # then: live camera, wave the printed board around
+```
+
+Move the board through a range of distances and tilts, and into the corners of
+the frame, not just the centre — distortion is only visible away from the
+image centre, so a lazy session that only shows the board dead-centre will
+recover a fine `fx` and a useless distortion estimate. The window shows how
+many good views have been captured; press `q` once you have 12+ (more is
+better), Esc to abort. It saves to `calib/intrinsics.json` — same file `s`
+already wrote from `track`, but now with real distortion coefficients instead
+of zeros, which `track` uses to undistort every frame before detection.
+
+The board's physical size barely matters here — unlike the AprilTag, whose
+size sets absolute scale, plane-based calibration cannot see the board's scale
+independent of distance, so print it at whatever size is convenient.
+
+### Field pose — `calibrate-field`
+
+Point a camera at the four reference AprilTags fixed to the real field, once,
+and solve for where the field actually is — this wraps
+`ReferenceTagFieldTransform` in `vision_core/field.py`, which already does the
+underlying `solvePnP` math (see the next section). Running it as its own
+command adds what raw `solvePnP` doesn't: several frames instead of one noisy
+shot, averaged, with a report on how well they agree. This one lives in the
+skill, not vision-core, because it needs pupil_apriltags to see the tags at all.
+
+```powershell
+uv run calibrate-field --synthetic                        # try it first: a digital field, no hardware needed
+uv run calibrate-field --field 1.2 0.8                    # your real field's size, tags at ids 0-3 on the corners
+uv run calibrate-field --layout 0:0,0 1:1.2,0 2:1.2,0.8 3:0,0.8  # or name ids/positions explicitly
+```
+
+Hold the camera steady on the field; it captures frames until all four
+reference tags have been seen 10+ times, then reports rotation/translation
+spread across those frames — a small spread means the solve is stable, a large
+one means something is loose or a tag ID is ambiguous. Saves to
+`calib/field_pose.json`.
+
+> **Cheapest real-hardware test: paper, no printer calibration needed.**
+> Print (or `uv run serve-tag --save-png`) 4 same-size AprilTags, or use
+> `uv run serve-tag --field-sheet field.png` to lay all 4 out on one A4-sized
+> sheet already positioned at a field rectangle's corners. Measure whatever
+> comes out of the printer with a ruler, then
+> `uv run calibrate-field --field <measured W> <measured H>`. You don't need
+> `calibrate-camera` first — it falls back to a guessed lens automatically,
+> fine for a first end-to-end check.
+
+### One command instead of two — `track --calibrate-live`
+
+```powershell
+uv run track --calibrate-live
+```
+
+Does exactly what `calibrate-field` does — point a real camera at the
+reference tags, it captures and solves live in the same window — and then,
+instead of exiting, immediately continues into the normal tracking loop using
+the pose it just solved. Also saves to `calib/field_pose.json` (or
+`--field-pose PATH`), so a later plain `uv run track` picks it up too. Use
+this when you just want to see the whole real pipeline work in one session;
+use the separate `calibrate-field` command when you want to calibrate once
+and walk away, or fine-tune the layout/tag-size flags without re-tracking
+each time.
+
+### Watching it work with no hardware — `track --synthetic-camera`
+
+```powershell
+uv run track --synthetic-camera
+```
+
+Opens the exact same window as step 2, but nothing is plugged in: the field,
+the camera, and the tracked tag are all simulated (`tag_tracking.synthetic`).
+On startup it prints a live calibration — solving the field pose from 4
+simulated reference tags, the same math `calibrate-field --synthetic` uses —
+and then the main loop runs exactly as it would against a real webcam, except
+the frames come from a digital camera instead of `cv2.VideoCapture`. One tag
+orbits the field on its own, swinging outside the boundary on the flat sides
+of its path so you also see the red `OUT` state without carrying anything past
+the edge yourself.
+
+It is a flag on `track`, not a separate command, on purpose: the overlay, plan
+view, readout, and every key are all the *same code* `track` always runs —
+only the source of frames changes. `w` (wall/floor) and `s` (save intrinsics)
+print an explanation instead of acting, since there is no real camera pose to
+toggle or lens to save here.
+
+### What changes once both exist
+
+Nothing, until you run `track`. Then:
+
+```powershell
+uv run track --tag-size 0.080
+```
+
+picks up `calib/field_pose.json` automatically — the on-screen header will say
+`measured, averaged over N frames...` instead of `synthetic wall, ... m ahead`,
+and the `w` (wall/floor) key stops doing anything, because there is no longer
+a "which fake pose" to toggle. Pass `--synthetic-field` to go back to the
+made-up field for a demo without disturbing the saved calibration, or
+`--field-pose PATH` to point at a different saved pose (e.g. one solved for a
+second camera).
+
+Both `--synthetic` modes never overwrite your real calibration: they only save
+if you also pass `--out`.
 
 ## Swapping in the real field
+
+`calibrate-field` above is the operational way to do this. What follows is
+what it wraps, and the place to look if you want a layout that isn't 4 tags at
+rectangle corners, or to call the solve from your own code.
 
 Everything about where the field is lives in `vision-core/src/vision_core/field.py`
 — not in this skill, because the ball tracker needs exactly the same answer.
@@ -197,7 +329,9 @@ transform = ReferenceTagFieldTransform.from_detections(dets, layout, K, dist)
 Downstream — `tag_field_pose`, the overlay, the plan view, the `(id, x, y, theta)`
 output — does not change, and `selfcheck` section 3 already exercises exactly this
 substitution. `ReferenceTagFieldTransform` also has `.save()` / `.load()` so you
-can solve the pose once from a good frame and reuse it for a fixed camera.
+can solve the pose once from a good frame and reuse it for a fixed camera —
+which is exactly what `calibrate-field` (previous section) automates, so you
+will not usually write this by hand.
 
 ## Conventions
 
@@ -235,10 +369,14 @@ overlay lands on the phone exactly, and the plan view agrees with the video.
 
 ```
 src/tag_tracking/
-  pose.py        TagFieldPose, tag_field_pose, TAG_VISUAL_RIGHT -- the tag-shaped bits
-  track.py       live tracking, overlay, plan view
-  serve_tag.py   serves the tag to the phone at a known physical size
-  selfcheck.py   synthetic end-to-end verification, no hardware
+  pose.py             TagFieldPose, tag_field_pose, TAG_VISUAL_RIGHT -- the tag-shaped bits
+  track.py            live tracking, overlay, plan view
+  serve_tag.py        serves the tag to the phone/paper at a known physical size
+  selfcheck.py        synthetic end-to-end verification, no hardware
+  synthetic.py        the digital field + reference tags calibration is tested against
+  calibrate_field.py  calibrate-field: field pose from 4 reference tags
+  calibrate_camera.py calibrate-camera: CLI wrapper around vision_core.charuco
+print/                sample printable tag assets (field_a4.png, tag PNGs)
 ```
 
 and, from the shared floor one level up:
@@ -248,10 +386,14 @@ and, from the shared floor one level up:
   field.py       the swap point: Field, CameraFieldTransform, Synthetic/ReferenceTag
   camera.py      open_camera, list_cameras, lock_camera
   intrinsics.py  load / save / from_fov / hfov_of
+  charuco.py     *measure* the camera matrix -- ChArUco board calibration + its digital self-test
   planview.py    draw_field on the video, PlanView beside it
-../calib/        intrinsics.json lands here when you press 's'
+../calib/        intrinsics.json (press 's', or calibrate-camera) and
+                 field_pose.json (calibrate-field) land here
 ```
 
 `pose.py` holds what is *about AprilTags*; `field.py` holds what is *about the
 field*. The line matters: when reference tags get mounted, `field.py` changes and
-nothing in this folder does.
+nothing in this folder does. `charuco.py` is camera-only calibration math and
+lives in vision-core for the same reason; `calibrate_field.py` needs
+pupil_apriltags to see the reference tags at all, so it stays here.
