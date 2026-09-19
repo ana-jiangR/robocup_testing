@@ -1,0 +1,29 @@
+[project]
+name = "combined-tracking"
+version = "0.1.0"
+description = "Track the robot's AprilTag and the ball together, in one camera session"
+readme = "README.md"
+# pupil-apriltags ships prebuilt wheels for cp310-cp313 only. On 3.14 pip
+# compiles it from source and the result is missing apriltag.dll, so the
+# tracker dies at import. Fail at resolve time instead.
+requires-python = ">=3.12,<3.14"
+dependencies = [
+    "numpy>=2.5.3",
+    "opencv-python>=5.0.0.93",
+    "pupil-apriltags>=1.0.4.post11",
+    "vision-core",
+    "tag-tracking",
+    "ball-tracking",
+]
+
+[project.scripts]
+track-combined = "combined_tracking.track_combined:main"
+
+[tool.uv.sources]
+vision-core = { workspace = true }
+tag-tracking = { workspace = true }
+ball-tracking = { workspace = true }
+
+[build-system]
+requires = ["uv_build>=0.12.12,<0.13.0"]
+build-backend = "uv_build"

@@ -14,6 +14,7 @@ dependencies = [
     "vision-core",
     "tag-tracking",
     "ball-tracking",
+    "combined-tracking",
 ]
 
 [tool.uv]
@@ -21,9 +22,10 @@ dependencies = [
 package = false
 
 [tool.uv.workspace]
-members = ["vision-core", "tag-tracking", "ball-tracking"]
+members = ["vision-core", "tag-tracking", "ball-tracking", "combined-tracking"]
 
 [tool.uv.sources]
 vision-core = { workspace = true }
 tag-tracking = { workspace = true }
 ball-tracking = { workspace = true }
+combined-tracking = { workspace = true }

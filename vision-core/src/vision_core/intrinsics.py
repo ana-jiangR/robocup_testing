@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import cv2
 import numpy as np
 
 from .paths import calib_path
@@ -44,6 +45,22 @@ def from_fov(width: int, height: int, hfov_deg: float = DEFAULT_HFOV_DEG) -> np.
 def hfov_of(K: np.ndarray, width: int) -> float:
     """The horizontal field of view a camera matrix implies, in degrees."""
     return float(np.degrees(2.0 * np.arctan((width / 2.0) / K[0, 0])))
+
+
+def undistort_maps(K: np.ndarray, dist: np.ndarray, width: int, height: int):
+    """Precomputed remap tables for cv2.remap, or None when there is no distortion.
+
+    Whole-frame undistortion (as opposed to undistorting one point at a time)
+    is worth the setup cost whenever a detector searches the whole image, not
+    just a single already-known point -- an AprilTag detector finds corners
+    everywhere, so the frame it sees has to be in the same undistorted pinhole
+    space the drawn overlay is, or outlines drift off the tags towards the
+    frame edges. Built once per K/dist/size; cv2.undistort() rebuilds the maps
+    on every call, about 8x slower.
+    """
+    if not np.any(dist):
+        return None
+    return cv2.initUndistortRectifyMap(K, dist, None, K, (width, height), cv2.CV_16SC2)
 
 
 def load(

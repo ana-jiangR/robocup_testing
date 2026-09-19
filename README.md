@@ -14,6 +14,14 @@ coordinates**, from a single webcam.
 Both report **filtered** motion, not frame-to-frame differences. Each keeps its
 own physics and shares one small Kalman filter core in `vision-core`.
 
+And an **integration**, not a third independent skill — it depends on both of
+the above instead of only on `vision-core`, and reuses their detectors and
+filters rather than reimplementing anything:
+
+| | What it tracks | Output |
+| --- | --- | --- |
+| [`combined-tracking/`](combined-tracking/) | The robot's tag *and* the ball, one camera, one window | both of the above, together |
+
 And the floor a skill stands on, which is **not** itself a skill:
 
 | | |
@@ -39,6 +47,12 @@ find a ball it has never been shown:
 ```powershell
 uv run calibrate-ball --profile mine --radius-mm 40   # drag a box over YOUR ball, press s
 uv run track-ball --ball-profile mine --cam-height 1.5
+```
+
+Need both the robot's tag and the ball at once, from the same camera?
+
+```powershell
+uv run track-combined --ball-profile mine --tag-size 0.080
 ```
 
 Turning the made-up field into a real, measured one is a one-time calibration
@@ -91,9 +105,13 @@ no default ball, so `calibrate-ball` is required before `track-ball` runs.
 | --- | --- |
 | `uv run track` | Tags — auto-loads whatever's already calibrated |
 | `uv run track-ball --ball-profile NAME` | Ball — same, and needs a color profile |
+| `uv run track-combined --ball-profile NAME` | Both, one camera, one window — see [`combined-tracking/`](combined-tracking/) |
 | `uv run unlock-camera` | Repair: a run that crashed with the camera locked leaves every app with a dark green picture. The tools also do this on start and exit. |
 
-One webcam serves one program, so run these in separate sessions, not at once.
+One webcam serves one program at a time — `track` and `track-ball` cannot
+both hold it open at once, so run those two in separate sessions, not
+together. `track-combined` is the exception on purpose: it opens the camera
+once and runs both detectors against the same frame, for exactly this case.
 
 ### Flags that matter
 
@@ -146,6 +164,7 @@ py -3.12 -m venv .venv                  # 3.12 or 3.13, not 3.14 — see below
 pip install -e ./vision-core            # THIS ORDER MATTERS
 pip install -e ./tag-tracking
 pip install -e ./ball-tracking
+pip install -e ./combined-tracking      # needs the two above already installed
 ```
 
 1. **Python 3.12 or 3.13 — not 3.14.** `pupil-apriltags` ships prebuilt wheels
