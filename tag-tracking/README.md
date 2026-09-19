@@ -253,6 +253,36 @@ one means something is loose or a tag ID is ambiguous. Saves to
 > `calibrate-camera` first — it falls back to a guessed lens automatically,
 > fine for a first end-to-end check.
 
+#### One tag instead of four — `--sequential`
+
+No field to fix four tags to, or nothing to fix them with? Carry a single tag
+to each corner instead — a phone, a print-out held by hand, or a robot that
+drives itself there. The camera stays fixed; the tag doesn't need to stay put
+anywhere except while it's being measured.
+
+```powershell
+uv run calibrate-field --sequential --synthetic          # try it first: no hardware needed
+uv run calibrate-field --sequential --field 1.2 0.8      # real run: one tag, moved to each corner in turn
+```
+
+A window prompts you through the 4 corners one at a time — `corner 1/4: place
+ONE tag at field (0, 0)`, and so on. At each one: hold the tag there (exactly
+one tag must be visible — a second one in frame is treated as ambiguous and
+ignored), watch it capture samples, and press `q` once it says enough are in
+to lock that corner in and move to the next (`r` re-does the current corner,
+Esc aborts). After the fourth corner it solves once, from the four averaged
+points, and reports **reprojection error** in pixels — project each known
+corner back through the solved pose and see how far off the tag's measured
+position lands; under ~1px is a good, unambiguous solve. There is no
+frame-to-frame agreement to report here the way the simultaneous mode has
+(there's only one solve), which is why the quality signal is different.
+
+Same idea from `track` in one step:
+
+```powershell
+uv run track --calibrate-live --sequential
+```
+
 ### One command instead of two — `track --calibrate-live`
 
 ```powershell

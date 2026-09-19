@@ -48,11 +48,14 @@ from vision_core.field import (
 from vision_core.planview import OUT_COLOR, PlanView, color_for, draw_field
 
 from .calibrate_field import (
+    FRAMES_PER_CORNER,
     MIN_FRAMES as CALIB_MIN_FRAMES,
     calibrate_field,
     capture_reference_frames,
+    capture_sequential_corners,
     default_field_layout,
     field_pose_path,
+    solve_sequential,
 )
 from .filter import SPEED_EPS, TagFieldState, TagTracker
 from .pose import TagFieldPose, tag_field_pose
@@ -275,6 +278,12 @@ def main() -> None:
                     help="real webcam: calibrate the field pose live from reference tags "
                          "(e.g. 4 printed AprilTags on a paper field) before tracking, "
                          "instead of loading a previously saved calib/field_pose.json")
+    ap.add_argument("--sequential", action="store_true",
+                    help="--calibrate-live: one tag moved to each corner in turn "
+                         "(camera fixed), e.g. a robot carrying a single AprilTag "
+                         "driven to each corner, instead of all 4 tags visible at once")
+    ap.add_argument("--frames-per-corner", type=int, default=FRAMES_PER_CORNER,
+                    help="--sequential: samples to average at each corner (default 15)")
     args = ap.parse_args()
 
     if args.list_cameras:
@@ -333,11 +342,6 @@ def main() -> None:
 
         if args.calibrate_live:
             layout = default_field_layout(field)
-            print(f"calibrating live: point the camera at reference tags {sorted(layout)} "
-                  f"at the corners of a {field.width:g} x {field.height:g} m field")
-            print("(e.g. printed AprilTags taped to the corners of a paper rectangle).")
-            print(f"hold steady; capturing until {CALIB_MIN_FRAMES}+ good frames, "
-                  "'q' to finish, Esc to abort.\n")
 
             def _read_bgr() -> np.ndarray:
                 ok2, frm = cap.read()
@@ -345,16 +349,38 @@ def main() -> None:
                     raise RuntimeError("camera stopped returning frames")
                 return frm
 
-            calib_frames = capture_reference_frames(
-                _read_bgr, layout, min_frames=CALIB_MIN_FRAMES,
-                window_name="calibrate-field (live)",
-            )
-            result = calibrate_field(calib_frames, layout, K, dist, min_frames=CALIB_MIN_FRAMES,
-                                     tag_size=args.tag_size)
-            print(f"\n{result.transform.source}")
-            print(f"agreement across frames: rotation spread "
-                  f"{result.rotation_spread_deg:.3f} deg, translation spread "
-                  f"{result.translation_spread_m * 1000:.2f} mm")
+            if args.sequential:
+                print(f"calibrating live: move ONE tag to each of {len(layout)} corners of "
+                      f"a {field.width:g} x {field.height:g} m field in turn, camera fixed")
+                print("(e.g. a single AprilTag mounted on a robot, driven to each corner).")
+                print("hold steady at each corner; 'q' confirms and moves to the next "
+                      "('r' retries the current one), Esc aborts.\n")
+
+                averaged = capture_sequential_corners(
+                    _read_bgr, layout, args.frames_per_corner,
+                    window_name="calibrate-field (one tag, live)",
+                )
+                result = solve_sequential(averaged, layout, K, dist)
+                print(f"\n{result.transform.source}")
+                print(f"reprojection error: {result.reproj_error_px:.3f} px rms, "
+                      f"{result.max_reproj_error_px:.3f} px max")
+            else:
+                print(f"calibrating live: point the camera at reference tags {sorted(layout)} "
+                      f"at the corners of a {field.width:g} x {field.height:g} m field")
+                print("(e.g. printed AprilTags taped to the corners of a paper rectangle).")
+                print(f"hold steady; capturing until {CALIB_MIN_FRAMES}+ good frames, "
+                      "'q' to finish, Esc to abort.\n")
+
+                calib_frames = capture_reference_frames(
+                    _read_bgr, layout, min_frames=CALIB_MIN_FRAMES,
+                    window_name="calibrate-field (live)",
+                )
+                result = calibrate_field(calib_frames, layout, K, dist, min_frames=CALIB_MIN_FRAMES,
+                                         tag_size=args.tag_size)
+                print(f"\n{result.transform.source}")
+                print(f"agreement across frames: rotation spread "
+                      f"{result.rotation_spread_deg:.3f} deg, translation spread "
+                      f"{result.translation_spread_m * 1000:.2f} mm")
             transform = result.transform
             using_calibrated = True
             calibrated_note = "solved live this session"

@@ -5,13 +5,23 @@ reference AprilTags and solve where the field is, once.
     uv run calibrate-field --field 1.2 0.8                    # a different field size
     uv run calibrate-field --layout 0:0,0 1:1.2,0 2:1.2,0.8 3:0,0.8
     uv run calibrate-field --synthetic                        # self-test, no hardware
+    uv run calibrate-field --sequential                       # one tag, moved to each corner in turn
 
 Wraps ReferenceTagFieldTransform (vision_core.field) -- the geometry already
 lives there; from_detections() alone is a single noisy solvePnP call on
 whatever frame you hand it. This makes running it a repeatable, checked,
-one-shot command: it reads several frames, solves the pose from each
-independently, reports how much they agree (a real quality signal, not just
-"it ran"), averages them, and saves.
+one-shot command.
+
+Two ways to capture the reference points, both solving the same underlying
+PnP problem:
+
+    simultaneous (default) -- all 4 reference tags fixed to the field and
+        visible at once. Reads several whole frames, solves the pose from
+        each independently, reports how much they agree, averages them.
+    sequential (--sequential) -- one tag, carried to each corner in turn
+        (e.g. mounted on a robot that drives there itself), camera fixed.
+        Averages that one tag's pixel position at each corner, then solves
+        once from the four averaged points.
 
 Saves to calib/field_pose.json, at the repo root (vision_core.paths), same as
 calib/intrinsics.json. track.py loads this automatically once it exists, in
@@ -40,6 +50,7 @@ from .pose import tag_field_pose
 
 MIN_FRAMES = 10
 MAX_LIVE_FRAMES = 40
+FRAMES_PER_CORNER = 15
 
 
 def default_field_layout(field: Field) -> dict[int, tuple[float, float]]:
@@ -196,6 +207,150 @@ def capture_reference_frames(
     return frames
 
 
+# --------------------------------------------------------------------------
+# Sequential capture: one tag, carried to each corner in turn, camera fixed.
+# --------------------------------------------------------------------------
+
+
+class _AveragedDetection:
+    """A fake pupil_apriltags detection standing in for one corner's averaged
+    pixel centre, so the averaged result can be solved through the exact same
+    ReferenceTagFieldTransform.from_detections() the simultaneous path uses,
+    instead of duplicating the solvePnP call-site.
+    """
+
+    __slots__ = ("tag_id", "center")
+
+    def __init__(self, tag_id: int, center: tuple[float, float]) -> None:
+        self.tag_id = tag_id
+        self.center = center
+
+
+@dataclass
+class SequentialCalibrationResult:
+    transform: ReferenceTagFieldTransform
+    n_corners: int
+    reproj_error_px: float
+    max_reproj_error_px: float
+
+
+def solve_sequential(
+    averaged: dict[int, np.ndarray],
+    layout: dict[int, tuple[float, float]],
+    K: np.ndarray,
+    dist: np.ndarray | None = None,
+) -> SequentialCalibrationResult:
+    """Solve one field pose from one averaged pixel position per corner,
+    instead of several tags seen at once -- the counterpart to
+    calibrate_field() for a single tag carried to each corner in turn.
+
+    There is only one solve here, not several to average, so the quality
+    signal is different too: reprojection error (px) -- project each known
+    field corner through the solved pose and compare to where it was actually
+    seen, the same idea calibrate-camera's rms_reproj_px uses for the lens.
+    """
+    fake_dets = [_AveragedDetection(tid, tuple(px)) for tid, px in averaged.items()]
+    transform = ReferenceTagFieldTransform.from_detections(fake_dets, layout, K, dist)
+    transform.source = f"measured, one tag moved to {len(averaged)} corners in turn"
+
+    obj = np.array([[*layout[tid], 0.0] for tid in averaged], np.float64)
+    img = np.array([averaged[tid] for tid in averaged], np.float64)
+    rvec, tvec = transform.rvec_tvec()
+    dist_c = dist if dist is not None else np.zeros(5, np.float64)
+    proj, _ = cv2.projectPoints(obj, rvec, tvec, K, dist_c)
+    err = np.linalg.norm(proj.reshape(-1, 2) - img, axis=1)
+    return SequentialCalibrationResult(
+        transform=transform,
+        n_corners=len(averaged),
+        reproj_error_px=float(np.sqrt(np.mean(err ** 2))),
+        max_reproj_error_px=float(err.max()),
+    )
+
+
+def capture_sequential_corners(
+    read_bgr: Callable[[], np.ndarray],
+    layout: dict[int, tuple[float, float]],
+    frames_per_corner: int = FRAMES_PER_CORNER,
+    window_name: str = "calibrate-field (one tag)",
+) -> dict[int, np.ndarray]:
+    """Interactively capture one tag's pixel centre at each field position in
+    `layout`, in turn -- for a single tag (e.g. mounted on a robot) driven to
+    each corner while the camera stays fixed, instead of several tags visible
+    at once.
+
+    At each position: accumulates every frame with *exactly one* tag visible
+    (zero or several are ambiguous, so skipped) up to `frames_per_corner`,
+    averaging their pixel centres to smooth out per-frame jitter. 'q' confirms
+    the current corner and moves to the next once enough samples are in;
+    'r' clears the current corner's samples to retry it; Esc aborts entirely.
+
+    Returns {tag_id: averaged pixel centre}, keyed the same way `layout` is --
+    the physical tag's id at capture time does not have to match; only the
+    order you visit `layout`'s positions in does.
+    """
+    detector = pa.Detector(families="tag36h11", nthreads=2, quad_decimate=1.0)
+    win = window_name
+    cv2.namedWindow(win, cv2.WINDOW_AUTOSIZE)
+    results: dict[int, np.ndarray] = {}
+    items = list(layout.items())
+    try:
+        for i, (label_id, (fx, fy)) in enumerate(items):
+            samples: list[np.ndarray] = []
+            while True:
+                bgr = read_bgr()
+                grey = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+                dets = detector.detect(grey)
+                disp = bgr.copy()
+                for d in dets:
+                    cv2.polylines(disp, [np.asarray(d.corners, np.int32)], True,
+                                  (0, 165, 255), 2)
+                good = len(dets) == 1
+                if good and len(samples) < frames_per_corner:
+                    samples.append(np.asarray(dets[0].center, np.float64))
+                ready = len(samples) >= frames_per_corner
+                status_colour = (
+                    (0, 255, 0) if ready else (0, 165, 255) if good else (0, 0, 255)
+                )
+                cv2.rectangle(disp, (0, 0), (disp.shape[1], 84), (0, 0, 0), -1)
+                cv2.putText(
+                    disp,
+                    f"corner {i + 1}/{len(items)}: place ONE tag at field "
+                    f"({fx:g}, {fy:g})   captured {len(samples)}/{frames_per_corner}",
+                    (10, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.6, status_colour, 2, cv2.LINE_AA,
+                )
+                if dets and not good:
+                    msg = f"{len(dets)} tags visible -- show exactly one"
+                elif not good:
+                    msg = "no tag visible"
+                else:
+                    msg = "'q' to confirm and move on" if ready else "hold steady -- capturing"
+                cv2.putText(
+                    disp, f"{msg}   |   'r' retry this corner   |   Esc abort",
+                    (10, 56), cv2.FONT_HERSHEY_SIMPLEX, 0.55,
+                    (0, 255, 0) if ready else (200, 200, 200), 1, cv2.LINE_AA,
+                )
+                cv2.imshow(win, disp)
+                key = read_key()
+                if key == 27:
+                    print("aborted")
+                    raise SystemExit(0)
+                if key == ord("r"):
+                    samples.clear()
+                if key == ord("q") and ready:
+                    break
+            avg = np.mean(samples, axis=0)
+            px_std = float(np.std(np.linalg.norm(np.array(samples) - avg, axis=1)))
+            results[label_id] = avg
+            print(
+                f"  corner {i + 1}/{len(items)} at ({fx:g}, {fy:g}): "
+                f"averaged {len(samples)} samples, pixel ({avg[0]:.1f}, {avg[1]:.1f}), "
+                f"jitter {px_std:.2f} px"
+            )
+    finally:
+        cv2.destroyWindow(win)
+    return results
+
+
 def _run_synthetic(args, field: Field, layout: dict[int, tuple[float, float]]):
     from vision_core.intrinsics import from_fov
 
@@ -274,6 +429,76 @@ def _run_live(args, field: Field, layout: dict[int, tuple[float, float]]):
     return result, (args.out or str(field_pose_path()))
 
 
+def _run_synthetic_sequential(args, field: Field, layout: dict[int, tuple[float, float]]):
+    from vision_core.intrinsics import from_fov
+
+    from .synthetic import SyntheticFieldCamera
+
+    shape = (args.height, args.width)
+    K = from_fov(args.width, args.height)
+    truth = SyntheticFieldTransform.floor(field, height=1.1, pitch_deg=40.0)
+    print(f"Synthetic field -- ground truth: {truth.source}")
+    print("simulating one tag carried to each corner in turn...\n")
+
+    detector = pa.Detector(families="tag36h11", nthreads=2, quad_decimate=1.0)
+    averaged: dict[int, np.ndarray] = {}
+    for tag_id, (cx, cy) in layout.items():
+        cam = SyntheticFieldCamera(
+            {}, truth, tag_size=args.tag_size, shape=shape, K=K,
+            extra_tags=((tag_id, cx, cy, 0.0),),
+        )
+        samples: list[np.ndarray] = []
+        while len(samples) < args.frames_per_corner:
+            dets = detector.detect(cam.read())
+            if len(dets) == 1:
+                samples.append(np.asarray(dets[0].center, np.float64))
+        avg = np.mean(samples, axis=0)
+        averaged[tag_id] = avg
+        print(f"  corner id {tag_id} at ({cx:g}, {cy:g}): "
+              f"averaged {len(samples)} synthetic samples, pixel ({avg[0]:.1f}, {avg[1]:.1f})")
+
+    result = solve_sequential(averaged, layout, K)
+    print(f"\n{result.transform.source}")
+    print(f"reprojection error: {result.reproj_error_px:.3f} px rms, "
+          f"{result.max_reproj_error_px:.3f} px max")
+    dR = _rotation_angle_deg(result.transform.R.T @ truth.R)
+    dt = float(np.linalg.norm(result.transform.t - truth.t))
+    print(f"vs ground truth: rotation off {dR:.2f} deg, origin off {dt * 1000:.1f} mm")
+    return result, args.out
+
+
+def _run_live_sequential(args, field: Field, layout: dict[int, tuple[float, float]]):
+    from vision_core.intrinsics import load as load_intrinsics
+
+    K, dist, intr_source = load_intrinsics(args.width, args.height)
+    print(f"intrinsics: {intr_source}")
+    print(f"one tag, moved to {len(layout)} positions in turn: {list(layout.values())}")
+    print("camera stays fixed. At each position: hold the tag steady, then")
+    print("'q' confirms and moves to the next corner ('r' retries this one), Esc aborts.\n")
+
+    cap = open_camera(args.camera, args.width, args.height)
+
+    def _read_bgr() -> np.ndarray:
+        ok, frm = cap.read()
+        if not ok:
+            raise RuntimeError("camera stopped returning frames")
+        return frm
+
+    try:
+        averaged = capture_sequential_corners(
+            _read_bgr, layout, args.frames_per_corner, "calibrate-field (one tag)"
+        )
+    finally:
+        cap.release()
+        cv2.destroyAllWindows()
+
+    result = solve_sequential(averaged, layout, K, dist)
+    print(f"\n{result.transform.source}")
+    print(f"reprojection error: {result.reproj_error_px:.3f} px rms, "
+          f"{result.max_reproj_error_px:.3f} px max")
+    return result, (args.out or str(field_pose_path()))
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument(
@@ -281,18 +506,29 @@ def main() -> None:
         help="self-test against a digital field, no hardware needed",
     )
     ap.add_argument(
+        "--sequential", action="store_true",
+        help="one tag, moved to each corner in turn (camera fixed) instead of "
+             "all reference tags visible at once -- e.g. a robot carrying a "
+             "single AprilTag, driven to each corner",
+    )
+    ap.add_argument(
         "--field", type=float, nargs=2, metavar=("W", "H"), default=[1.2, 0.8],
         help="field size in metres, used to build the default 4-corner layout",
     )
     ap.add_argument(
         "--layout", nargs="+", metavar="ID:X,Y",
-        help="override the default corners, e.g. 0:0,0 1:1.2,0 2:1.2,0.8 3:0,0.8",
+        help="override the default corners, e.g. 0:0,0 1:1.2,0 2:1.2,0.8 3:0,0.8 "
+             "(--sequential: visited in this order; the ids are just labels)",
     )
     ap.add_argument("--tag-size", type=float, default=0.080)
     ap.add_argument("--camera", type=int, default=0)
     ap.add_argument("--width", type=int, default=1280)
     ap.add_argument("--height", type=int, default=720)
     ap.add_argument("--min-frames", type=int, default=MIN_FRAMES)
+    ap.add_argument(
+        "--frames-per-corner", type=int, default=FRAMES_PER_CORNER,
+        help="--sequential: samples to average at each corner (default 15)",
+    )
     ap.add_argument(
         "--out", type=str, default=None,
         help="where to save (default calib/field_pose.json at the repo root; "
@@ -303,9 +539,16 @@ def main() -> None:
     field = Field(args.field[0], args.field[1])
     layout = parse_layout(args.layout) if args.layout else default_field_layout(field)
 
-    result, out = (
-        _run_synthetic(args, field, layout) if args.synthetic else _run_live(args, field, layout)
-    )
+    if args.synthetic:
+        result, out = (
+            _run_synthetic_sequential(args, field, layout) if args.sequential
+            else _run_synthetic(args, field, layout)
+        )
+    else:
+        result, out = (
+            _run_live_sequential(args, field, layout) if args.sequential
+            else _run_live(args, field, layout)
+        )
 
     if out:
         Path(out).parent.mkdir(parents=True, exist_ok=True)
