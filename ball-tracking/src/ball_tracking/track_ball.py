@@ -271,7 +271,8 @@ def main() -> None:
     ap.add_argument("--list-cameras", action="store_true")
     ap.add_argument("--list-profiles", action="store_true")
     ap.add_argument("--display-width", type=int, default=1600,
-                    help="shrink the window if the composite is wider than this")
+                    help="scale the window to this width in pixels; "
+                         "enlarges as well as shrinks")
     ap.add_argument("--print-states", action="store_true",
                     help="also stream x/y/vx/vy/grounded to stdout")
     args = ap.parse_args()
@@ -378,10 +379,13 @@ def main() -> None:
 
             panel = draw_plan(plan, state, trail, transform, show_trails)
             composite = np.hstack([shown, panel])
-            if composite.shape[1] > args.display_width:
+            if composite.shape[1] != args.display_width:
                 k = args.display_width / composite.shape[1]
-                composite = cv2.resize(composite, None, fx=k, fy=k,
-                                       interpolation=cv2.INTER_AREA)
+                # INTER_AREA is the right filter for shrinking and a poor one
+                # for enlarging, where it degenerates to nearest-neighbour.
+                composite = cv2.resize(
+                    composite, None, fx=k, fy=k,
+                    interpolation=cv2.INTER_AREA if k < 1.0 else cv2.INTER_LINEAR)
             cv2.imshow(win, composite)
 
             key = read_key()

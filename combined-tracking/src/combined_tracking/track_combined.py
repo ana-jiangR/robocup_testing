@@ -417,11 +417,14 @@ def main() -> None:
     ap.add_argument("--list-cameras", action="store_true")
     ap.add_argument("--list-profiles", action="store_true")
     ap.add_argument("--display-width", type=int, default=1600,
-                    help="shrink the window if the composite is wider than this")
+                    help="scale the window to this width in pixels; "
+                         "enlarges as well as shrinks")
     ap.add_argument("--print-poses", action="store_true",
-                    help="also stream tag id/x/y/theta to stdout")
+                    help="also stream tag (id, x, y, theta, vx, vy, speed, visible) "
+                         "to stdout, one tab-separated line per tag per frame")
     ap.add_argument("--print-states", action="store_true",
-                    help="also stream ball x/y/z to stdout")
+                    help="also stream ball (x, y, z, vx, vy, grounded, visible) "
+                         "to stdout, one tab-separated line per frame")
     ap.add_argument("--json-out", type=str, default=None,
                     help="write the current frame's tag and ball detections to this "
                          "PATH as JSON, overwritten every frame, for another process "
@@ -600,10 +603,13 @@ def main() -> None:
             panel = draw_combined_plan(plan, tag_states, tag_trails, ball_state,
                                        ball_trail, transform, show_trails)
             composite = np.hstack([frame, panel])
-            if composite.shape[1] > args.display_width:
+            if composite.shape[1] != args.display_width:
                 k = args.display_width / composite.shape[1]
-                composite = cv2.resize(composite, None, fx=k, fy=k,
-                                       interpolation=cv2.INTER_AREA)
+                # INTER_AREA is the right filter for shrinking and a poor one
+                # for enlarging, where it degenerates to nearest-neighbour.
+                composite = cv2.resize(
+                    composite, None, fx=k, fy=k,
+                    interpolation=cv2.INTER_AREA if k < 1.0 else cv2.INTER_LINEAR)
             cv2.imshow(win, composite)
 
             key = read_key()
