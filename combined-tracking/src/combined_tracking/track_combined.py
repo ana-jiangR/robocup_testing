@@ -24,6 +24,12 @@ Keys:
 from __future__ import annotations
 
 import argparse
+import http.server
+import json
+import os
+import socket
+import socketserver
+import threading
 import time
 from collections import defaultdict, deque
 from pathlib import Path
@@ -184,6 +190,145 @@ def draw_combined_plan(
 
 
 # --------------------------------------------------------------------------
+# Live state export: the current frame's detections, for another process
+# (a separate repo, a simulator, anything) to read.
+# --------------------------------------------------------------------------
+
+
+def tag_state_to_dict(s: TagFieldState) -> dict:
+    return {
+        "id": s.tag_id,
+        "x": s.x,
+        "y": s.y,
+        "theta_deg": s.theta_deg,
+        "vx": s.vx,
+        "vy": s.vy,
+        "speed": s.speed,
+        "direction_deg": s.direction_deg,
+        "omega_deg": s.omega_deg,
+        "inside": s.inside,
+        "visible": s.visible,
+        "off_plane_m": s.off_plane_m,
+    }
+
+
+def ball_state_to_dict(s: BallFieldState, field: Field) -> dict:
+    return {
+        "x": s.x,
+        "y": s.y,
+        "z": s.z,
+        "vx": s.vx,
+        "vy": s.vy,
+        "speed": s.speed,
+        "direction_deg": s.direction_deg,
+        "grounded": s.grounded,
+        "visible": s.visible,
+        "inside": s.inside(field),
+        "age": s.age,
+    }
+
+
+def build_state_doc(
+    field: Field,
+    tag_states: list[TagFieldState],
+    ball_state: BallFieldState | None,
+) -> dict:
+    """The current frame's detections as one plain dict -- the single source
+    of truth both --json-out and --serve-http publish, so a reader gets the
+    identical shape whichever transport it uses.
+
+    Field coordinates throughout: metres, field frame, same convention as
+    every printed readout in this project (see the root README).
+    """
+    return {
+        "timestamp": time.time(),
+        "field": {"width": field.width, "height": field.height},
+        "tags": [tag_state_to_dict(s) for s in tag_states],
+        "ball": None if ball_state is None else ball_state_to_dict(ball_state, field),
+    }
+
+
+def write_json_state(path: Path, doc: dict) -> None:
+    """Overwrite `path` with `doc`, as JSON, atomically.
+
+    Written to a sibling `.tmp` file, then moved over the real path with
+    `os.replace()` -- an atomic rename on both Windows and POSIX, so a reader
+    on another process, polling this file on its own schedule unsynchronised
+    with this one, can never open it mid-write and see truncated or
+    half-updated JSON. Plain "open path, write, close" does not have that
+    guarantee: a reader can land exactly between the open (which truncates
+    the old file) and the write finishing.
+    """
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(doc, indent=2))
+    os.replace(tmp, path)
+
+
+def lan_ip() -> str:
+    """Best guess at this machine's address on the local network -- same
+    trick serve_tag.py uses, so a reader on a *different* machine knows what
+    to connect to, not just localhost."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("8.8.8.8", 80))  # no packets sent; just picks the route
+        return s.getsockname()[0]
+    except OSError:
+        return "127.0.0.1"
+    finally:
+        s.close()
+
+
+class LiveStateServer:
+    """Serves the latest build_state_doc() as JSON over plain HTTP GET, so a
+    reader anywhere on the network -- a different process, a different
+    machine, a browser-based simulator -- can poll it without touching this
+    machine's filesystem. Runs in a background thread; call publish() once
+    per frame from the main loop, same spirit as write_json_state but kept in
+    memory instead of on disk.
+    """
+
+    def __init__(self, port: int) -> None:
+        self._lock = threading.Lock()
+        self._doc: dict | None = None
+        outer = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self) -> None:  # noqa: N802
+                if self.path not in ("/", "/state"):
+                    self.send_error(404)
+                    return
+                with outer._lock:
+                    doc = outer._doc
+                body = json.dumps(doc if doc is not None else {}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                # No CORS proxy needed for a browser-based reader (e.g. a web
+                # simulator) to fetch() this directly.
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, fmt: str, *fmt_args) -> None:  # noqa: N802
+                pass  # quiet; startup already printed where to look
+
+        socketserver.ThreadingTCPServer.allow_reuse_address = True
+        self._httpd = socketserver.ThreadingTCPServer(("0.0.0.0", port), Handler)
+        self._httpd.daemon_threads = True
+        self._thread = threading.Thread(target=self._httpd.serve_forever, daemon=True)
+        self._thread.start()
+
+    def publish(self, doc: dict) -> None:
+        with self._lock:
+            self._doc = doc
+
+    def stop(self) -> None:
+        self._httpd.shutdown()
+        self._httpd.server_close()
+
+
+# --------------------------------------------------------------------------
 
 
 def build_transform(args, field: Field, mode: str) -> CameraFieldTransform:
@@ -269,7 +414,22 @@ def main() -> None:
                     help="also stream tag id/x/y/theta to stdout")
     ap.add_argument("--print-states", action="store_true",
                     help="also stream ball x/y/z to stdout")
+    ap.add_argument("--json-out", type=str, default=None,
+                    help="write the current frame's tag and ball detections to this "
+                         "PATH as JSON, overwritten every frame, for another process "
+                         "(a simulator, another repo) to read. Off by default. The "
+                         "write is atomic, so a reader polling the file on its own "
+                         "schedule never sees a half-written one")
+    ap.add_argument("--serve-http", type=int, default=None, metavar="PORT",
+                    help="also (or instead) serve the same detections as JSON over "
+                         "plain HTTP GET at this port, for a reader anywhere on the "
+                         "network -- a different machine, a browser-based simulator -- "
+                         "instead of (or as well as) --json-out's local file. Off by "
+                         "default")
     args = ap.parse_args()
+    json_out = Path(args.json_out) if args.json_out else None
+    if json_out:
+        json_out.parent.mkdir(parents=True, exist_ok=True)
 
     if args.list_cameras:
         list_cameras()
@@ -295,6 +455,7 @@ def main() -> None:
 
     cap = open_camera(args.camera, args.width, args.height)
     locked = False
+    http_server = None
     if not args.no_lock:
         # Let the camera settle on the scene before freezing it, or the lock
         # freezes whatever exposure it happened to open with. Tag detection
@@ -344,6 +505,12 @@ def main() -> None:
         print(f"tag size {args.tag_size * 1000:.1f} mm, "
               f"ball '{color.name}' r={color.radius_m * 1000:.0f} mm")
         print(f"intrinsics: {intr_source}")
+        if json_out is not None:
+            print(f"writing live state to {json_out} every frame")
+        http_server = LiveStateServer(args.serve_http) if args.serve_http else None
+        if http_server is not None:
+            print(f"serving live state at http://localhost:{args.serve_http}/state "
+                  f"(or http://{lan_ip()}:{args.serve_http}/state from another machine)")
         print("window open -- q or Esc to quit\n")
 
         win = "combined tracking"
@@ -393,6 +560,12 @@ def main() -> None:
             if args.print_states and ball_state is not None:
                 print(f"ball\t{ball_state.x:.4f}\t{ball_state.y:.4f}\t{ball_state.z:.4f}",
                       flush=True)
+            if json_out is not None or http_server is not None:
+                doc = build_state_doc(field, tag_states, ball_state)
+                if json_out is not None:
+                    write_json_state(json_out, doc)
+                if http_server is not None:
+                    http_server.publish(doc)
 
             panel = draw_combined_plan(plan, tag_states, tag_trails, ball_state,
                                        ball_trail, transform, show_trails)
@@ -444,6 +617,8 @@ def main() -> None:
                     print("(fx only, no lens distortion -- run calibrate-camera for that)")
 
     finally:
+        if http_server is not None:
+            http_server.stop()
         if locked:
             print("camera unlock: " + ", ".join(unlock_camera(cap)))
         cap.release()

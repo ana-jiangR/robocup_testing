@@ -51,6 +51,83 @@ each tracker has its own independent `sigma_a`:
 skill exists for the real robot+ball rig, where `floor` is the physically
 meaningful geometry.
 
+## Feeding another program
+
+Two independent, opt-in ways to publish what's being tracked to some other
+process — a simulator, a robot's own control loop, anything in any language.
+Both publish the exact same JSON shape (below); use either one, or both at
+once, whichever fits how the reader can reach this machine.
+
+### A local file — `--json-out`
+
+```powershell
+uv run track-combined --ball-profile test --tag-size 0.080 --json-out live_state.json
+```
+
+Writes the current frame's detections to that path, **overwritten every
+frame** — a reader just re-reads the file whenever it wants the latest state.
+Needs the reader to have filesystem access to this machine (same machine, or
+a shared/mounted drive).
+
+The write is **atomic**: each frame is built in memory, written to a sibling
+`<path>.tmp`, then moved on top of the real path in one filesystem operation
+(`os.replace`, atomic on both Windows and POSIX). A reader polling the file
+on its own, unsynchronised schedule can never open it mid-write and see
+truncated or half-updated JSON — it always sees either the previous complete
+frame or the new complete one, never something in between.
+
+### A tiny HTTP server — `--serve-http PORT`
+
+```powershell
+uv run track-combined --ball-profile test --tag-size 0.080 --serve-http 8000
+```
+
+Prints the URL to use (`http://localhost:8000/state`, and the LAN address for
+a reader on a *different* machine). A reader does a plain `GET` whenever it
+wants the latest state — works from any language with an HTTP client, and
+needs no filesystem access to this machine at all, just network reachability.
+`GET /` works too, same response as `/state`. CORS is wide open
+(`Access-Control-Allow-Origin: *`), so a browser-based simulator can
+`fetch()` it directly with no proxy.
+
+Runs in a background thread inside the same process — starts when the window
+does, stops cleanly when you quit. The state it serves is whatever the most
+recent frame published; there is no history, no queue, just "ask and get the
+latest."
+
+Shape (same for both):
+
+```json
+{
+  "timestamp": 1730000000.123,
+  "field": { "width": 1.2, "height": 0.8 },
+  "tags": [
+    {
+      "id": 5, "x": 0.600, "y": 0.400, "theta_deg": 19.98,
+      "vx": 0.0, "vy": 0.0, "speed": 0.0, "direction_deg": 0.0, "omega_deg": 0.0,
+      "inside": true, "visible": true, "off_plane_m": 0.004
+    }
+  ],
+  "ball": {
+    "x": 0.246, "y": -0.121, "z": 0.247,
+    "vx": 0.0, "vy": 0.0, "speed": 0.0, "direction_deg": 0.0,
+    "grounded": false, "visible": true, "inside": false, "age": 0.0
+  }
+}
+```
+
+`tags` is a list (zero or more — every currently-tracked tag id, not just
+one). `ball` is `null` when no ball has ever been seen yet, otherwise always
+present (with `visible: false` while the filter is coasting through a
+dropout, same meaning as everywhere else in this project). All positions are
+in **metres, field coordinates** — same convention as every readout and
+plan-view in this project (see the root README's Conventions section):
+origin at one field corner, `+X` along `width`, `+Y` along `height`. `age` is
+seconds since the ball was last actually seen (0 while it's currently
+visible). `timestamp` is `time.time()` (Unix epoch seconds) at the moment
+that frame was captured, in case the reader wants to compute its own latency
+or discard a stale file.
+
 ## Why a separate skill, not a flag on `track` or `track-ball`
 
 Making either existing skill import the other would mean `tag-tracking` and
@@ -69,7 +146,7 @@ src/combined_tracking/
 
 Everything else it uses lives in `tag-tracking`, `ball-tracking`, or
 `vision-core` — this file is deliberately thin: argument parsing, one shared
-camera/frame loop, and drawing functions that combine both trackers' output
-onto one readout strip and one plan-view panel, since neither existing
+camera/frame loop, drawing functions that combine both trackers' output onto
+one readout strip and one plan-view panel (since neither existing
 `draw_readout`/`draw_plan` can be called twice without their fixed-size
-screen regions colliding.
+screen regions colliding), and `write_json_state` for `--json-out`.
