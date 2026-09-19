@@ -9,6 +9,11 @@ dependencies = [
     "opencv-python>=5.0.0.93",
 ]
 
+[project.scripts]
+# A repair tool, not a capability: a crashed run can leave the camera locked,
+# and nothing else in the repo can put it back.
+unlock-camera = "vision_core.camera:unlock_main"
+
 [build-system]
 requires = ["uv_build>=0.12.12,<0.13.0"]
 build-backend = "uv_build"

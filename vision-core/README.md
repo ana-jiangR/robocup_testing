@@ -6,7 +6,7 @@ Not a skill — the floor every skill stands on. Anything here is true about the
 | Module | Owns |
 | --- | --- |
 | `field.py` | **The swap point.** `Field`, `CameraFieldTransform`, `SyntheticFieldTransform`, `ReferenceTagFieldTransform`. |
-| `camera.py` | `open_camera`, `list_cameras`, `lock_camera` (auto-exposure / auto-WB off), `read_key` (case-folded `waitKey`). |
+| `camera.py` | `open_camera` (always hands back a camera on auto), `list_cameras`, `lock_camera` (manual exposure matched to auto's brightness, auto-WB off unless that tints the picture — each half reverts to auto if it does harm), `unlock_camera` (the lock outlives the process — call it on exit), `read_key` (case-folded `waitKey`). `uv run unlock-camera` for runs that died locked. |
 | `intrinsics.py` | `load`, `save`, `from_fov`, `hfov_of`. Keyed on resolution. |
 | `paths.py` | `repo_root()`, `calib_path()` — so `calib/` resolves regardless of cwd. |
 | `kalman.py` | `KalmanFilter` (Mahalanobis gate, Joseph update, angle-wrapped residuals) plus constant-velocity `F`/`Q` builders. The physics stays in each skill. |

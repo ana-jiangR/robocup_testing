@@ -98,10 +98,17 @@ depends on.
 ## How it works
 
 **1 · Lock the camera.** Auto-exposure and auto-WB off. The single biggest
-robustness win available, for two property writes: a camera left on auto
-re-exposes whenever something bright crosses frame, and the ball's color drifts
-out from under the profile. Both properties are advisory, so `lock_camera` reads
-them back and reports what actually stuck.
+robustness win available: a camera left on auto re-exposes whenever something
+bright crosses frame, and the ball's color drifts out from under the profile.
+Both properties are advisory, so `lock_camera` reads them back and reports what
+actually stuck, and checks each for damage: going manual on exposure jumps to
+a stale value the driver remembers, so the lock measures brightness first and
+walks the manual value until it matches; manual white balance on some cameras
+is a fixed temperature that tints the picture green, so color balance is
+measured either side and the lock rolled back if it moved. Whatever can't be
+held safely is left on auto and reported. The lock lives in the driver and
+outlives the process, so both tools unlock on exit; if a run dies before it
+can, `uv run unlock-camera` puts the camera back.
 
 **2 · Color mask.** `cv2.calcBackProject` over a measured H/S histogram, not a
 hard `inRange` — `inRange` is a cliff where one degree of hue drift makes the
@@ -148,8 +155,8 @@ single threshold either misses a ball genuinely 20 cm up, or flaps frame to fram
 — which is worse than either answer, because it keeps swapping the measurement
 model out from under the filter.
 
-**6 · Velocity.** A 6-state Kalman filter `[x, y, z, vx, vy, vz]` with gravity in
-the prediction, built on `vision_core.kalman` (the same core the tag tracker
+**6 · Velocity.** A 6-state Kalman filter `[x, y, z, vx, vy, vz]`, built on
+`vision_core.kalman` (the same core the tag tracker
 uses; the ball physics lives here). Never difference raw positions: one pixel of
 jitter at 2 m is ~0.1 m/s of pure noise, as fast as the ball rolls. Measured —
 raw differencing σ = 0.095 m/s, filtered σ = 0.049 m/s, mean unbiased to 2 mm/s.
@@ -157,11 +164,20 @@ raw differencing σ = 0.095 m/s, filtered σ = 0.049 m/s, mean unbiased to 2 mm/
 | | measurement | noise | out-of-plane |
 | --- | --- | --- | --- |
 | **grounded** | ray/plane `(x, y)` | small — real geometry against a known plane | `z` pinned to radius, `vz` to 0 |
-| **airborne** | radius-based 3D point | large | `−g` on `vz`, so a parabola *is* the model |
+| **airborne** | radius-based 3D point | large, plus larger process noise (`--sigma-a-air`) | free — and deliberately **no gravity** |
+
+No gravity term, on purpose. A parabola is right for a ball in flight and wrong
+for a ball in a hand — and the hand is how you test this. With `g` in the
+prediction, a held ball's range is known to a centimetre, so the gate rejected
+the "it didn't fall" measurement within two frames, the state fell away at
+9.8 m/s² unopposed, and the track timed out and restarted in a loop. The ranger
+is also too weak to see a parabola over the few frames a bounce lasts, so the
+model bought nothing. Airborne acceleration is process noise instead, sized to
+cover gravity.
 
 Also buys coasting through motion-blur dropouts, a Mahalanobis gate against false
 positives, and range-dependent noise `R ∝ (σ_px · Z / fx)²`. Tune `--sigma-a`
-(2–4 m/s² for carpet). `dt` is **measured** from `perf_counter` right after
+(2–4 m/s² for carpet) and `--sigma-a-air` (10 m/s²: gravity, a bounce, a hand). `dt` is **measured** from `perf_counter` right after
 `cap.read()` — feeding it a nominal 1/30 against an actual 24 fps mis-scales every
 velocity, and the error looks like drift rather than a bug.
 
@@ -211,6 +227,8 @@ class BallFieldState:
 | Height/airborne is noisy | Expected — see Honest limits. It answers *airborne yes/no*, not *how high*. |
 | Never flips to airborne | Lift it higher, or lower the camera. The check gets more sensitive the closer the camera is. |
 | Keys do nothing, mouse works | Click the video window; if letters are still ignored, switch your input method to English, or use `Esc`. |
+| Picture is dark, or green, in every app | A run crashed with the camera locked, and the driver kept the manual exposure. `uv run unlock-camera`, or just start either tool — `open_camera` puts it back on auto first. |
+| `camera lock:` says `REVERTED` | That half of the lock damaged the picture (manual exposure couldn't reach auto's brightness, or manual WB tinted it green), so it was left on auto. Tracking still works; the hue may drift a little if the lighting changes. |
 | `calibrate-ball`/`track-ball` not found | `ball-tracking` isn't in the workspace. Check the root `pyproject.toml`, then `uv sync`. |
 
 ## Layout
@@ -223,5 +241,5 @@ src/ball_tracking/
 ```
 
 The filter's matrix algebra is `vision_core.kalman`, shared with the tag
-tracker; what lives here is the ball physics — gravity, and switching between
-the grounded and airborne measurement models.
+tracker; what lives here is the ball physics — switching between the grounded
+and airborne measurement models, sized so the switch itself doesn't get gated out.

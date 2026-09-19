@@ -32,9 +32,6 @@ from vision_core.kalman import KalmanFilter, cv_process_noise, cv_transition
 
 from .ball_color import BallColor
 
-#: Standard gravity, m/s^2.
-G = 9.80665
-
 #: Below this speed the direction of travel is noise, not a direction.
 SPEED_EPS = 0.05
 
@@ -293,30 +290,29 @@ def depth_sigma(depth_m: float, radius_px: float, sigma_radius_px: float = 1.5) 
 # --------------------------------------------------------------------------
 
 
-def gravity_in_field(mode: str) -> np.ndarray:
-    """Which way is down, in field coordinates.
-
-    The only part of this file that is not mode-agnostic, and it cannot be: the
-    transform relates camera to field and says nothing about how the field sits
-    in the world. floor -- the field is the ground, +Z up, so gravity is -Z.
-    wall -- a vertical plane with +Y up, so gravity is -Y.
-    """
-    if mode == "floor":
-        return np.array([0.0, 0.0, -G])
-    return np.array([0.0, -G, 0.0])
-
-
 class BallFilter:
     """A 6-state Kalman filter: [x, y, z, vx, vy, vz] in field metres.
 
     The matrix algebra is vision_core.kalman; this class is the ball physics on
-    top of it -- gravity, and swapping between two measurement models, which is
-    the whole trick here:
+    top of it -- swapping between two measurement models, which is the whole
+    trick here:
 
     GROUNDED   the ray/plane (x, y). Real geometry against a known plane, so
                small R. z is pinned to the radius and vz to zero.
-    AIRBORNE   the radius-derived 3D point, with a much larger R. Gravity enters
-               the prediction, so a parabola is literally the model.
+    AIRBORNE   the radius-derived 3D point, with a much larger R and a much
+               larger process noise, and no gravity.
+
+    No gravity is deliberate. A parabola is the right model for a ball in
+    flight and the wrong one for a ball in a hand, and the hand is how this
+    gets tested -- the README says to lift the ball, and wall mode exists for
+    holding it up. With g in the prediction and a near ball's range known to
+    a centimetre, the gate rejected the "it did not fall" measurement within
+    two frames, the state fell away at 9.8 m/s^2 unopposed, and the track
+    timed out and restarted, over and over. Nor does the model buy anything:
+    the radius ranger is too weak to see a parabola over the handful of frames
+    a bounce lasts. So airborne acceleration is process noise, sized to cover
+    gravity, and the answer stays "airborne yes/no", which is all the sensor
+    can give.
 
     Beyond smoothing this buys velocity worth having (differencing raw positions
     gives ~0.1 m/s of pure noise at 2 m, as fast as the ball rolls), coasting
@@ -326,8 +322,8 @@ class BallFilter:
 
     def __init__(
         self,
-        mode: str = "floor",
         sigma_a: float = 3.0,
+        sigma_a_air: float = 10.0,
         gate: float = 9.0,
         max_coast_s: float = 0.35,
     ) -> None:
@@ -335,8 +331,10 @@ class BallFilter:
         #: carpet, where the "acceleration" being modelled is mostly the surface
         #: pushing back unevenly. Raise it if the ball gets kicked a lot.
         self.sigma_a = float(sigma_a)
+        #: The same, while airborne. Must cover gravity, a bounce, or a hand
+        #: changing its mind, since none of those is in the prediction.
+        self.sigma_a_air = float(sigma_a_air)
         self.max_coast_s = float(max_coast_s)
-        self.g = gravity_in_field(mode)
 
         #: Mahalanobis gate. ~9 is the 99% point for 2 degrees of freedom.
         self.kf = KalmanFilter(np.zeros(6), np.eye(6) * 1e3, gate=gate)
@@ -349,11 +347,8 @@ class BallFilter:
     def predict(self, dt: float) -> None:
         if not self.initialised or dt <= 0.0:
             return
-        self.kf.predict(cv_transition(dt, 3), cv_process_noise(dt, [self.sigma_a] * 3))
-        if not self.grounded:
-            # Gravity only acts on a ball that is not being held up by the field.
-            self.kf.x[:3] += 0.5 * self.g * dt * dt
-            self.kf.x[3:] += self.g * dt
+        sigma = self.sigma_a if self.grounded else self.sigma_a_air
+        self.kf.predict(cv_transition(dt, 3), cv_process_noise(dt, [sigma] * 3))
         self.age += dt
 
     # -- update ------------------------------------------------------------
@@ -373,13 +368,19 @@ class BallFilter:
         self.grounded = grounded
         self.age = 0.0
 
-    def update_grounded(self, xy: np.ndarray, sigma_xy: float, plane_z: float) -> bool:
-        """Measure the precise in-plane position; pin the out-of-plane state."""
+    def update_grounded(
+        self, xy: np.ndarray, sigma_xy: float, plane_z: float, jump: float = 0.0
+    ) -> bool:
+        """Measure the precise in-plane position; pin the out-of-plane state.
+
+        `jump` is how far this measurement is from the current estimate, and
+        only matters when the regime is changing -- see release().
+        """
         if not self.grounded:
             # Landing is a regime change too, and the estimate we are landing
             # with came from the weak radius ranger. Loosen before believing the
             # precise measurement, for the same reason as the other direction.
-            self.release(0.10)
+            self.release(max(float(jump), 0.10))
         H = np.zeros((2, 6))
         H[0, 0] = H[1, 1] = 1.0
         R = np.eye(2) * sigma_xy**2
@@ -399,6 +400,14 @@ class BallFilter:
     def release(self, sigma: float) -> None:
         """Loosen the state after the regime changed under us.
 
+        `sigma` must be the size of the jump the new regime implies -- the gap
+        between where the filter is and where the first measurement of the new
+        regime says the ball is -- not the noise on that measurement. Loosened
+        by the noise (millimetres for a near ball), the gate rejects a jump of
+        a metre as impossible and the filter coasts until the track times out;
+        loosened by the jump, the first measurement lands and the filter is
+        simply re-seeded where the ball is, velocity kept.
+
         Applies to x and y as much as to z, which is the subtle part. While
         grounded, x and y came from the ray/plane intersection and were precise,
         so their variance shrank to nearly nothing -- and the moment the ball
@@ -413,17 +422,20 @@ class BallFilter:
         for i in range(3, 6):
             P[i, i] = max(P[i, i], 1.0)
 
-    def update_airborne(self, point: np.ndarray, R: np.ndarray) -> bool:
+    def update_airborne(
+        self, point: np.ndarray, R: np.ndarray, jump: float = 0.0
+    ) -> bool:
         """Measure the weak radius-derived 3D point, with honest covariance.
 
         `R` is the full 3x3 from ray_covariance, not a diagonal: the uncertainty
         is a cigar along the view ray, and saying so is what keeps the filter
-        from over-trusting a measurement that is only precise sideways.
+        from over-trusting a measurement that is only precise sideways. `jump`
+        is the distance from the current estimate, for release().
         """
         R = np.asarray(R, np.float64).reshape(3, 3)
         if self.grounded:
             self.grounded = False
-            self.release(float(np.sqrt(np.max(np.diag(R)))))
+            self.release(max(float(jump), float(np.sqrt(np.max(np.diag(R))))))
         H = np.zeros((3, 6))
         H[0, 0] = H[1, 1] = H[2, 2] = 1.0
         return self._update(np.asarray(point, np.float64).reshape(3), H, R)
@@ -486,9 +498,9 @@ class BallTracker:
         transform: CameraFieldTransform,
         K: np.ndarray,
         dist: np.ndarray | None = None,
-        mode: str = "floor",
         sigma_px: float = 1.5,
         sigma_a: float = 3.0,
+        sigma_a_air: float = 10.0,
         air_sigmas: float = 1.5,
         air_min_margin: float = 0.04,
         air_hold: int = 2,
@@ -501,7 +513,7 @@ class BallTracker:
         self.fx = float(self.K[0, 0])
         self.radius_m = float(color.radius_m)
         self.sigma_px = float(sigma_px)
-        self.filter = BallFilter(mode=mode, sigma_a=sigma_a)
+        self.filter = BallFilter(sigma_a=sigma_a, sigma_a_air=sigma_a_air)
         #: Sigmas of depth disagreement needed to *enter* the airborne state,
         #: with a floor under it so a very close ball is not called airborne on
         #: millimetres. Leaving again needs only 0.4 of this -- see observe().
@@ -645,11 +657,15 @@ class BallTracker:
             self.filter.start(point, grounded=not use_air)
             return self.filter.state(visible=True)
 
+        # A regime change moves the estimate by the whole ground/air gap, not
+        # by a measurement's noise. Tell the filter how far, so the gate lets
+        # the first measurement of the new regime in.
+        jump = float(np.linalg.norm(np.asarray(point, np.float64) - self.filter.position))
         if use_air:
-            accepted = self.filter.update_airborne(point, obs.air_cov)
+            accepted = self.filter.update_airborne(point, obs.air_cov, jump=jump)
         else:
             accepted = self.filter.update_grounded(
-                np.asarray(point)[:2], obs.sigma_xy, self.radius_m
+                np.asarray(point)[:2], obs.sigma_xy, self.radius_m, jump=jump
             )
 
         if not accepted and self.filter.lost():

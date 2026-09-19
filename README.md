@@ -89,6 +89,7 @@ no default ball, so `calibrate-ball` is required before `track-ball` runs.
 | --- | --- |
 | `uv run track` | Tags — auto-loads whatever's already calibrated |
 | `uv run track-ball --ball-profile NAME` | Ball — same, and needs a color profile |
+| `uv run unlock-camera` | Repair: a run that crashed with the camera locked leaves every app with a dark green picture. The tools also do this on start and exit. |
 
 One webcam serves one program, so run these in separate sessions, not at once.
 

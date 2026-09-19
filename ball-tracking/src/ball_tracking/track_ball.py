@@ -22,7 +22,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 from vision_core import intrinsics as intr
-from vision_core.camera import list_cameras, lock_camera, open_camera, read_key
+from vision_core.camera import list_cameras, lock_camera, unlock_camera, open_camera, read_key
 from vision_core.field import (
     CameraFieldTransform,
     Field,
@@ -245,6 +245,11 @@ def main() -> None:
                     help="process noise as an acceleration, m/s^2. 2-4 suits a "
                          "ball rolling on carpet; raise it if the ball gets "
                          "kicked hard and the filter lags")
+    ap.add_argument("--sigma-a-air", type=float, default=10.0,
+                    help="process noise while airborne, m/s^2. Has to cover "
+                         "gravity, a bounce, or a hand moving the ball: there "
+                         "is no ballistic model, because a held ball does not "
+                         "fall and the radius ranger cannot see a parabola")
     ap.add_argument("--sigma-px", type=float, default=1.5,
                     help="assumed pixel noise on the ball centre")
     ap.add_argument("--camera", type=int, default=0, help="camera index")
@@ -287,7 +292,7 @@ def main() -> None:
     mode = args.mode
     # The measured field pose, if calibrate-field has produced one, else the
     # made-up rig. Same file and same rule as the tag tracker; --mode still
-    # says which way gravity points, since the pose file does not know.
+    # labels the plan view (top-down or head-on), which the pose file does not know.
     pose_path = Path(args.field_pose) if args.field_pose else field_pose_path()
     using_calibrated = pose_path.exists() and not args.synthetic_field
     if using_calibrated:
@@ -297,129 +302,138 @@ def main() -> None:
         transform = build_transform(args, field, mode)
 
     cap = open_camera(args.camera, args.width, args.height)
+    locked = False
     if not args.no_lock:
         # Let the camera settle on the scene before freezing it, or we lock in
         # whatever exposure it happened to open with.
         for _ in range(20):
             cap.read()
         print("camera lock: " + ", ".join(lock_camera(cap)))
+        locked = True
 
-    ok, frame = cap.read()
-    if not ok:
-        raise SystemExit("camera opened but the first frame failed")
-    h, w = frame.shape[:2]
+    try:
+        ok, frame = cap.read()
+        if not ok:
+            raise SystemExit("camera opened but the first frame failed")
+        h, w = frame.shape[:2]
 
-    if args.hfov is not None:
-        K = intr.from_fov(w, h, args.hfov)
-        dist = np.zeros(5)
-        intr_source = f"assumed {args.hfov:g} deg HFOV"
-    else:
-        K, dist, intr_source = intr.load(w, h)
+        if args.hfov is not None:
+            K = intr.from_fov(w, h, args.hfov)
+            dist = np.zeros(5)
+            intr_source = f"assumed {args.hfov:g} deg HFOV"
+        else:
+            K, dist, intr_source = intr.load(w, h)
 
-    tracker = BallTracker(color, transform, K, dist, mode=mode,
-                          sigma_px=args.sigma_px, sigma_a=args.sigma_a)
-    plan = PlanView(field, height=h, mode=mode)
-    trail: deque = deque(maxlen=TRAIL_LEN)
+        tracker = BallTracker(color, transform, K, dist, sigma_px=args.sigma_px,
+                              sigma_a=args.sigma_a, sigma_a_air=args.sigma_a_air)
+        plan = PlanView(field, height=h, mode=mode)
+        trail: deque = deque(maxlen=TRAIL_LEN)
 
-    show_grid, show_trails, show_mask, paused = True, True, True, False
-    fps = 0.0
-    last_t = time.perf_counter()
+        show_grid, show_trails, show_mask, paused = True, True, True, False
+        fps = 0.0
+        last_t = time.perf_counter()
 
-    print(f"\nfield {field.width:g} x {field.height:g} m, {transform.source}")
-    print(f"ball '{color.name}' radius {color.radius_m * 1000:.0f} mm, "
-          f"peak hue H~{color.hue_peak()}")
-    print(f"intrinsics: {intr_source}")
-    print("window open -- q or Esc to quit\n")
+        print(f"\nfield {field.width:g} x {field.height:g} m, {transform.source}")
+        print(f"ball '{color.name}' radius {color.radius_m * 1000:.0f} mm, "
+              f"peak hue H~{color.hue_peak()}")
+        print(f"intrinsics: {intr_source}")
+        print("window open -- q or Esc to quit\n")
 
-    win = "ball tracking"
-    cv2.namedWindow(win, cv2.WINDOW_AUTOSIZE)
-    state: BallFieldState | None = None
+        win = "ball tracking"
+        cv2.namedWindow(win, cv2.WINDOW_AUTOSIZE)
+        state: BallFieldState | None = None
 
-    while True:
-        if not paused:
-            ok, frame = cap.read()
-            # Sample the clock right after the grab, and hand the filter the dt
-            # it actually got. A filter fed a nominal 1/30 while the camera
-            # delivers a jittery 24 mis-scales every velocity it reports, and the
-            # error looks like drift rather than like a bug.
-            now = time.perf_counter()
-            dt = now - last_t
-            last_t = now
-            if not ok:
-                print("camera stopped returning frames")
+        while True:
+            if not paused:
+                ok, frame = cap.read()
+                # Sample the clock right after the grab, and hand the filter the dt
+                # it actually got. A filter fed a nominal 1/30 while the camera
+                # delivers a jittery 24 mis-scales every velocity it reports, and the
+                # error looks like drift rather than like a bug.
+                now = time.perf_counter()
+                dt = now - last_t
+                last_t = now
+                if not ok:
+                    print("camera stopped returning frames")
+                    break
+
+                state = tracker.update(frame, dt)
+                if state is not None and state.visible:
+                    trail.append((state.x, state.y))
+                fps = 0.9 * fps + 0.1 / max(dt, 1e-6)
+
+                if args.print_states and state is not None:
+                    print(f"{state.x:.4f}\t{state.y:.4f}\t{state.z:.4f}\t"
+                          f"{state.vx:.4f}\t{state.vy:.4f}\t{int(state.grounded)}\t"
+                          f"{int(state.visible)}", flush=True)
+
+            shown = frame.copy()
+            draw_field(shown, field, transform, K, show_grid)
+            draw_ball_marks(shown, tracker, state, show_mask)
+            draw_readout(shown, state, tracker, field, transform, K, color.name,
+                         intr_source, fps)
+            if paused:
+                cv2.putText(shown, "PAUSED", (w // 2 - 60, 70),
+                            cv2.FONT_HERSHEY_SIMPLEX, 1.0, (60, 200, 255), 2, cv2.LINE_AA)
+
+            panel = draw_plan(plan, state, trail, transform, show_trails)
+            composite = np.hstack([shown, panel])
+            if composite.shape[1] > args.display_width:
+                k = args.display_width / composite.shape[1]
+                composite = cv2.resize(composite, None, fx=k, fy=k,
+                                       interpolation=cv2.INTER_AREA)
+            cv2.imshow(win, composite)
+
+            key = read_key()
+            if key in (ord("q"), 27):
                 break
+            elif key == ord("g"):
+                show_grid = not show_grid
+            elif key == ord("t"):
+                show_trails = not show_trails
+            elif key == ord("m"):
+                show_mask = not show_mask
+            elif key == ord("p"):
+                paused = not paused
+                last_t = time.perf_counter()  # do not bill the pause to the filter
+            elif key == ord("r"):
+                trail.clear()
+            elif key in (ord("["), ord("]")):
+                K = K.copy()
+                K[0, 0] *= 0.98 if key == ord("[") else 1.02
+                K[1, 1] = K[0, 0]
+                intr_source = "hand-tuned"
+                tracker = BallTracker(color, transform, K, dist, sigma_px=args.sigma_px,
+                                      sigma_a=args.sigma_a, sigma_a_air=args.sigma_a_air)
+                trail.clear()
+                print(f"fx {K[0, 0]:.1f}  -> {intr.hfov_of(K, w):.1f} deg HFOV")
+            elif key == ord("w") and using_calibrated:
+                print(f"field is calibrated ({transform.source}); "
+                      "pass --synthetic-field to demo the made-up wall/floor instead")
+            elif key == ord("w"):
+                mode = "floor" if mode == "wall" else "wall"
+                transform = build_transform(args, field, mode)
+                plan = PlanView(field, height=h, mode=mode)
+                tracker = BallTracker(color, transform, K, dist, sigma_px=args.sigma_px,
+                                      sigma_a=args.sigma_a, sigma_a_air=args.sigma_a_air)
+                trail.clear()
+                print(f"transform: {transform.source}")
+            elif key == ord("s"):
+                # Keep whatever distortion was loaded: saving K alone would
+                # silently zero a calibrate-camera result.
+                path = intr.save(K, w, h, intr_source, dist=dist)
+                print(f"saved {path}")
+                if not np.any(dist):
+                    print("(fx only, no lens distortion -- run calibrate-camera for that)")
 
-            state = tracker.update(frame, dt)
-            if state is not None and state.visible:
-                trail.append((state.x, state.y))
-            fps = 0.9 * fps + 0.1 / max(dt, 1e-6)
-
-            if args.print_states and state is not None:
-                print(f"{state.x:.4f}\t{state.y:.4f}\t{state.z:.4f}\t"
-                      f"{state.vx:.4f}\t{state.vy:.4f}\t{int(state.grounded)}\t"
-                      f"{int(state.visible)}", flush=True)
-
-        shown = frame.copy()
-        draw_field(shown, field, transform, K, show_grid)
-        draw_ball_marks(shown, tracker, state, show_mask)
-        draw_readout(shown, state, tracker, field, transform, K, color.name,
-                     intr_source, fps)
-        if paused:
-            cv2.putText(shown, "PAUSED", (w // 2 - 60, 70),
-                        cv2.FONT_HERSHEY_SIMPLEX, 1.0, (60, 200, 255), 2, cv2.LINE_AA)
-
-        panel = draw_plan(plan, state, trail, transform, show_trails)
-        composite = np.hstack([shown, panel])
-        if composite.shape[1] > args.display_width:
-            k = args.display_width / composite.shape[1]
-            composite = cv2.resize(composite, None, fx=k, fy=k,
-                                   interpolation=cv2.INTER_AREA)
-        cv2.imshow(win, composite)
-
-        key = read_key()
-        if key in (ord("q"), 27):
-            break
-        elif key == ord("g"):
-            show_grid = not show_grid
-        elif key == ord("t"):
-            show_trails = not show_trails
-        elif key == ord("m"):
-            show_mask = not show_mask
-        elif key == ord("p"):
-            paused = not paused
-            last_t = time.perf_counter()  # do not bill the pause to the filter
-        elif key == ord("r"):
-            trail.clear()
-        elif key in (ord("["), ord("]")):
-            K = K.copy()
-            K[0, 0] *= 0.98 if key == ord("[") else 1.02
-            K[1, 1] = K[0, 0]
-            intr_source = "hand-tuned"
-            tracker = BallTracker(color, transform, K, dist, mode=mode,
-                                  sigma_px=args.sigma_px, sigma_a=args.sigma_a)
-            trail.clear()
-            print(f"fx {K[0, 0]:.1f}  -> {intr.hfov_of(K, w):.1f} deg HFOV")
-        elif key == ord("w") and using_calibrated:
-            print(f"field is calibrated ({transform.source}); "
-                  "pass --synthetic-field to demo the made-up wall/floor instead")
-        elif key == ord("w"):
-            mode = "floor" if mode == "wall" else "wall"
-            transform = build_transform(args, field, mode)
-            plan = PlanView(field, height=h, mode=mode)
-            tracker = BallTracker(color, transform, K, dist, mode=mode,
-                                  sigma_px=args.sigma_px, sigma_a=args.sigma_a)
-            trail.clear()
-            print(f"transform: {transform.source}")
-        elif key == ord("s"):
-            # Keep whatever distortion was loaded: saving K alone would
-            # silently zero a calibrate-camera result.
-            path = intr.save(K, w, h, intr_source, dist=dist)
-            print(f"saved {path}")
-            if not np.any(dist):
-                print("(fx only, no lens distortion -- run calibrate-camera for that)")
-
-    cap.release()
-    cv2.destroyAllWindows()
+    finally:
+        # The lock lives in the driver and outlasts this process. Leaving
+        # it set hands the next run -- and every other app -- a frozen
+        # picture, which on some cameras is a dark green one.
+        if locked:
+            print("camera unlock: " + ", ".join(unlock_camera(cap)))
+        cap.release()
+        cv2.destroyAllWindows()
 
 
 if __name__ == "__main__":

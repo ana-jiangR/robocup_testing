@@ -31,7 +31,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-from vision_core.camera import list_cameras, lock_camera, open_camera, read_key
+from vision_core.camera import list_cameras, lock_camera, unlock_camera, open_camera, read_key
 from vision_core.paths import calib_path
 
 #: Shared across skills -- it describes the camera's view of a ball, and lives
@@ -395,106 +395,115 @@ def main() -> None:
         return
 
     cap = open_camera(args.camera, args.width, args.height)
+    locked = False
     if not args.no_lock:
         # Let the camera settle on the scene before freezing it, otherwise we
         # lock in whatever exposure it happened to open with.
         for _ in range(20):
             cap.read()
         print("camera lock: " + ", ".join(lock_camera(cap)))
+        locked = True
 
-    profile = BallColor(
-        name=args.profile,
-        radius_m=args.radius_mm / 1000.0,
-        note=args.note,
-        s_min=args.s_min,
-        threshold=args.threshold,
-    )
-    sampler = _Sampler()
-    have_sample = False
-    samples: list[np.ndarray] = []
+    try:
+        profile = BallColor(
+            name=args.profile,
+            radius_m=args.radius_mm / 1000.0,
+            note=args.note,
+            s_min=args.s_min,
+            threshold=args.threshold,
+        )
+        sampler = _Sampler()
+        have_sample = False
+        samples: list[np.ndarray] = []
 
-    cv2.namedWindow(WIN, cv2.WINDOW_AUTOSIZE)
-    cv2.setMouseCallback(WIN, sampler.on_mouse)
+        cv2.namedWindow(WIN, cv2.WINDOW_AUTOSIZE)
+        cv2.setMouseCallback(WIN, sampler.on_mouse)
 
-    print(f"\nCalibrating profile '{profile.name}' "
-          f"(ball radius {profile.radius_m * 1000:.0f} mm).")
-    print("  drag a box over the ball   sample it (release to apply)")
-    print("  a                          add another drag to the same sample")
-    print("  h                          print a hue histogram of the scene")
-    print("  - / +                      back-projection threshold down / up")
-    print("  [ / ]                      saturation floor down / up")
-    print("  s                          save     q / Esc  quit\n")
-    print("Aim for a mask that covers the ball and almost nothing else.")
-    print("Then roll the ball into shadow and check it survives.\n")
+        print(f"\nCalibrating profile '{profile.name}' "
+              f"(ball radius {profile.radius_m * 1000:.0f} mm).")
+        print("  drag a box over the ball   sample it (release to apply)")
+        print("  a                          add another drag to the same sample")
+        print("  h                          print a hue histogram of the scene")
+        print("  - / +                      back-projection threshold down / up")
+        print("  [ / ]                      saturation floor down / up")
+        print("  s                          save     q / Esc  quit\n")
+        print("Aim for a mask that covers the ball and almost nothing else.")
+        print("Then roll the ball into shadow and check it survives.\n")
 
-    def resample() -> None:
-        nonlocal have_sample
-        if not samples:
-            return
-        try:
-            profile.hist = histogram_from_samples(np.vstack(samples), profile.s_min)
-            have_sample = True
-            print(f"sampled {sum(len(s) for s in samples)} px, "
-                  f"peak hue H~{profile.hue_peak()} ({_hue_name(profile.hue_peak())})")
-        except ValueError as e:
-            print(f"sample rejected: {e}")
+        def resample() -> None:
+            nonlocal have_sample
+            if not samples:
+                return
+            try:
+                profile.hist = histogram_from_samples(np.vstack(samples), profile.s_min)
+                have_sample = True
+                print(f"sampled {sum(len(s) for s in samples)} px, "
+                      f"peak hue H~{profile.hue_peak()} ({_hue_name(profile.hue_peak())})")
+            except ValueError as e:
+                print(f"sample rejected: {e}")
 
-    while True:
-        ok, frame = cap.read()
-        if not ok:
-            print("camera stopped returning frames")
-            break
+        while True:
+            ok, frame = cap.read()
+            if not ok:
+                print("camera stopped returning frames")
+                break
 
-        box = sampler.region()
-        if box and not sampler.dragging:
-            hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-            patch = hsv[box[1]:box[3], box[0]:box[2]].reshape(-1, 3)
-            samples = [patch]  # a fresh drag replaces; 'a' accumulates
-            sampler.box = None
-            resample()
-
-        cv2.imshow(WIN, _overlay(frame, profile, sampler, have_sample))
-
-        key = read_key()
-        if key in (ord("q"), 27):
-            break
-        elif key == ord("h"):
-            print_scene_histogram(
-                scene_hue_histogram(frame),
-                profile.hue_peak() if have_sample else None,
-            )
-        elif key in (ord("-"), ord("_")):
-            profile.threshold = max(1, profile.threshold - 5)
-            print(f"threshold {profile.threshold}")
-        elif key in (ord("+"), ord("=")):
-            profile.threshold = min(254, profile.threshold + 5)
-            print(f"threshold {profile.threshold}")
-        elif key == ord("["):
-            profile.s_min = max(0, profile.s_min - 5)
-            resample()
-            print(f"s_min {profile.s_min}")
-        elif key == ord("]"):
-            profile.s_min = min(254, profile.s_min + 5)
-            resample()
-            print(f"s_min {profile.s_min}")
-        elif key == ord("a"):
-            b = sampler.region()
-            if b:
+            box = sampler.region()
+            if box and not sampler.dragging:
                 hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-                samples.append(hsv[b[1]:b[3], b[0]:b[2]].reshape(-1, 3))
+                patch = hsv[box[1]:box[3], box[0]:box[2]].reshape(-1, 3)
+                samples = [patch]  # a fresh drag replaces; 'a' accumulates
+                sampler.box = None
                 resample()
-            else:
-                print("drag a box first, then press 'a' to add it")
-        elif key == ord("s"):
-            if not have_sample:
-                print("nothing sampled yet -- drag a box over the ball first")
-                continue
-            path = save_profile(profile)
-            print(f"saved profile '{profile.name}' to {path}")
-            print(f"  use it with:  uv run track-ball --ball-profile {profile.name}")
 
-    cap.release()
-    cv2.destroyAllWindows()
+            cv2.imshow(WIN, _overlay(frame, profile, sampler, have_sample))
+
+            key = read_key()
+            if key in (ord("q"), 27):
+                break
+            elif key == ord("h"):
+                print_scene_histogram(
+                    scene_hue_histogram(frame),
+                    profile.hue_peak() if have_sample else None,
+                )
+            elif key in (ord("-"), ord("_")):
+                profile.threshold = max(1, profile.threshold - 5)
+                print(f"threshold {profile.threshold}")
+            elif key in (ord("+"), ord("=")):
+                profile.threshold = min(254, profile.threshold + 5)
+                print(f"threshold {profile.threshold}")
+            elif key == ord("["):
+                profile.s_min = max(0, profile.s_min - 5)
+                resample()
+                print(f"s_min {profile.s_min}")
+            elif key == ord("]"):
+                profile.s_min = min(254, profile.s_min + 5)
+                resample()
+                print(f"s_min {profile.s_min}")
+            elif key == ord("a"):
+                b = sampler.region()
+                if b:
+                    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+                    samples.append(hsv[b[1]:b[3], b[0]:b[2]].reshape(-1, 3))
+                    resample()
+                else:
+                    print("drag a box first, then press 'a' to add it")
+            elif key == ord("s"):
+                if not have_sample:
+                    print("nothing sampled yet -- drag a box over the ball first")
+                    continue
+                path = save_profile(profile)
+                print(f"saved profile '{profile.name}' to {path}")
+                print(f"  use it with:  uv run track-ball --ball-profile {profile.name}")
+
+    finally:
+        # The lock lives in the driver and outlasts this process. Leaving
+        # it set hands the next run -- and every other app -- a frozen
+        # picture, which on some cameras is a dark green one.
+        if locked:
+            print("camera unlock: " + ", ".join(unlock_camera(cap)))
+        cap.release()
+        cv2.destroyAllWindows()
 
 
 if __name__ == "__main__":
