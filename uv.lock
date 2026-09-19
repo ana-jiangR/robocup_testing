@@ -5,6 +5,7 @@ requires-python = ">=3.12, <3.14"
 [manifest]
 members = [
     "ball-tracking",
+    "combined-tracking",
     "robocup-testing",
     "tag-tracking",
     "vision-core",
@@ -24,6 +25,29 @@ dependencies = [
 requires-dist = [
     { name = "numpy", specifier = ">=2.5.3" },
     { name = "opencv-python", specifier = ">=5.0.0.93" },
+    { name = "vision-core", editable = "vision-core" },
+]
+
+[[package]]
+name = "combined-tracking"
+version = "0.1.0"
+source = { editable = "combined-tracking" }
+dependencies = [
+    { name = "ball-tracking" },
+    { name = "numpy" },
+    { name = "opencv-python" },
+    { name = "pupil-apriltags" },
+    { name = "tag-tracking" },
+    { name = "vision-core" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "ball-tracking", editable = "ball-tracking" },
+    { name = "numpy", specifier = ">=2.5.3" },
+    { name = "opencv-python", specifier = ">=5.0.0.93" },
+    { name = "pupil-apriltags", specifier = ">=1.0.4.post11" },
+    { name = "tag-tracking", editable = "tag-tracking" },
     { name = "vision-core", editable = "vision-core" },
 ]
 
@@ -99,6 +123,7 @@ version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
     { name = "ball-tracking" },
+    { name = "combined-tracking" },
     { name = "tag-tracking" },
     { name = "vision-core" },
 ]
@@ -106,6 +131,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "ball-tracking", editable = "ball-tracking" },
+    { name = "combined-tracking", editable = "combined-tracking" },
     { name = "tag-tracking", editable = "tag-tracking" },
     { name = "vision-core", editable = "vision-core" },
 ]

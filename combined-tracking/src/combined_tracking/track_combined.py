@@ -90,7 +90,7 @@ def draw_combined_readout(
                 (220, 220, 220), 1, cv2.LINE_AA)
 
     n_tag_lines = max(len(tag_states), 1)
-    n_ball_lines = 2
+    n_ball_lines = 2 if ball_state is not None else 1
     strip_h = 16 + 22 * n_tag_lines + 22 * n_ball_lines
     cv2.rectangle(frame, (0, h - strip_h), (w, h), (0, 0, 0), -1)
     y = h - strip_h + 20
@@ -339,9 +339,17 @@ def build_transform(args, field: Field, mode: str) -> CameraFieldTransform:
     return SyntheticFieldTransform.wall(field, args.distance, args.yaw, args.pitch_wall)
 
 
-def _new_ball_tracker(args, color, transform, K, dist) -> BallTracker:
+def _new_ball_tracker(args, color, transform, K) -> BallTracker:
+    """A BallTracker for the *already undistorted* frame this tool hands it.
+
+    dist is None on purpose, and deliberately not a parameter: by the time the
+    ball tracker sees the frame it has been whole-frame undistorted for the tag
+    detector, so undistorting the ball centre again would correct a distortion
+    that is no longer there. Making it an argument only invites someone to pass
+    the real coefficients through.
+    """
     return BallTracker(
-        color, transform, K, dist, sigma_px=args.ball_sigma_px,
+        color, transform, K, None, sigma_px=args.ball_sigma_px,
         sigma_a=args.ball_sigma_a, sigma_a_air=args.ball_sigma_a_air,
     )
 
@@ -483,11 +491,7 @@ def main() -> None:
                                    decode_sharpening=0.25)
         tag_tracker = TagTracker(field, sigma_a=args.tag_sigma_a,
                                  sigma_alpha_deg=args.tag_sigma_alpha)
-        # The frame handed to BallTracker is the whole-frame-undistorted one
-        # below (when there is real distortion to correct), so it must not
-        # also undistort per-point internally -- that would double-correct.
-        # dist=None here is deliberate, not a placeholder.
-        ball_tracker = _new_ball_tracker(args, color, transform, K, None)
+        ball_tracker = _new_ball_tracker(args, color, transform, K)
 
         plan = PlanView(field, height=h, mode=mode)
         tag_trails: dict[int, deque] = defaultdict(lambda: deque(maxlen=TAG_TRAIL_LEN))
@@ -553,12 +557,19 @@ def main() -> None:
             draw_combined_readout(frame, tag_states, ball_state, field, transform, K,
                                   args.tag_size, color.name, color.radius_m, intr_source, fps)
 
+            # Same fields each skill's own --print-* emits, prefixed with which
+            # kind of row it is. Dropping grounded/visible would leave a reader
+            # unable to tell a coasting or airborne estimate from a measured
+            # one, which is the one thing it most needs to know.
             if args.print_poses:
                 for s in tag_states:
-                    print(f"tag\t{s.tag_id}\t{s.x:.4f}\t{s.y:.4f}\t{s.theta_deg:.2f}",
+                    print(f"tag\t{s.tag_id}\t{s.x:.4f}\t{s.y:.4f}\t{s.theta_deg:.2f}\t"
+                          f"{s.vx:+.3f}\t{s.vy:+.3f}\t{s.speed:.3f}\t{int(s.visible)}",
                           flush=True)
             if args.print_states and ball_state is not None:
-                print(f"ball\t{ball_state.x:.4f}\t{ball_state.y:.4f}\t{ball_state.z:.4f}",
+                print(f"ball\t{ball_state.x:.4f}\t{ball_state.y:.4f}\t{ball_state.z:.4f}\t"
+                      f"{ball_state.vx:+.4f}\t{ball_state.vy:+.4f}\t"
+                      f"{int(ball_state.grounded)}\t{int(ball_state.visible)}",
                       flush=True)
             if json_out is not None or http_server is not None:
                 doc = build_state_doc(field, tag_states, ball_state)
@@ -589,13 +600,18 @@ def main() -> None:
                 tag_trails.clear()
                 ball_trail.clear()
                 tag_tracker.reset()
+                # BallTracker has no reset() -- rebuilding it is the reset.
+                # Leaving this out makes `r` clear the tag tracks while
+                # silently keeping the ball track, which may be exactly the
+                # thing you pressed `r` to get rid of.
+                ball_tracker = _new_ball_tracker(args, color, transform, K)
             elif key in (ord("["), ord("]")):
                 K = K.copy()
                 K[0, 0] *= 0.98 if key == ord("[") else 1.02
                 K[1, 1] = K[0, 0]
                 intr_source = "hand-tuned"
                 undistort_maps = intr.undistort_maps(K, dist, w, h)
-                ball_tracker = _new_ball_tracker(args, color, transform, K, None)
+                ball_tracker = _new_ball_tracker(args, color, transform, K)
                 print(f"fx {K[0, 0]:.1f}  -> {intr.hfov_of(K, w):.1f} deg HFOV")
             elif key == ord("w"):
                 if using_calibrated:
@@ -608,7 +624,7 @@ def main() -> None:
                     tag_trails.clear()
                     ball_trail.clear()
                     tag_tracker.reset()
-                    ball_tracker = _new_ball_tracker(args, color, transform, K, None)
+                    ball_tracker = _new_ball_tracker(args, color, transform, K)
                     print(f"transform: {transform.source}")
             elif key == ord("s"):
                 path = intr.save(K, w, h, intr_source, dist=dist)
