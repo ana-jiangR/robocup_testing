@@ -53,10 +53,10 @@ meaningful geometry.
 
 ## Feeding another program
 
-Two independent, opt-in ways to publish what's being tracked to some other
+Three independent, opt-in ways to publish what's being tracked to some other
 process — a simulator, a robot's own control loop, anything in any language.
-Both publish the exact same JSON shape (below); use either one, or both at
-once, whichever fits how the reader can reach this machine.
+All three publish the exact same per-frame JSON shape (below); use whichever
+fits the reader, or several at once.
 
 ### A local file — `--json-out`
 
@@ -95,7 +95,28 @@ does, stops cleanly when you quit. The state it serves is whatever the most
 recent frame published; there is no history, no queue, just "ask and get the
 latest."
 
-Shape (same for both):
+### A growing log — `--json-log PATH`
+
+```powershell
+uv run track-combined --ball-profile test --tag-size 0.080 --json-log session.jsonl
+```
+
+The other two are both "current state, overwritten" — this one is history
+instead: **appends** one JSON object per frame as its own line (a
+[JSON Lines](https://jsonlines.org/) file, so a reader `readline()`s or
+`tail -f`s it and gets one complete record per line, never a partial one).
+Use this when the reader wants to replay or analyse a whole session rather
+than only ever ask "where is it right now" — or when it isn't running at the
+same time as the tracker at all, and reads the file afterward.
+
+Each line is flushed to disk immediately, not buffered — a `tail -f` sees a
+new line the moment that frame was processed, no lag waiting for a buffer to
+fill. The file only grows; nothing here rotates or truncates it, so a long
+session can produce a large file — that's on you to manage (delete it,
+`gzip` it, whatever fits), same as any other log file.
+
+Shape (one object, whether it's the single current state from `--json-out`/
+`--serve-http`, or one line of `--json-log`):
 
 ```json
 {
@@ -149,4 +170,7 @@ Everything else it uses lives in `tag-tracking`, `ball-tracking`, or
 camera/frame loop, drawing functions that combine both trackers' output onto
 one readout strip and one plan-view panel (since neither existing
 `draw_readout`/`draw_plan` can be called twice without their fixed-size
-screen regions colliding), and `write_json_state` for `--json-out`.
+screen regions colliding), and the three `--json-out`/`--serve-http`/
+`--json-log` publishers (`build_state_doc` builds the one shared dict each of
+the three then does something different with — write it atomically,
+serve it over HTTP, or append it to a log).

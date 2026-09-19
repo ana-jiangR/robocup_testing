@@ -113,6 +113,19 @@ both hold it open at once, so run those two in separate sessions, not
 together. `track-combined` is the exception on purpose: it opens the camera
 once and runs both detectors against the same frame, for exactly this case.
 
+### Getting live positions into another program
+
+`track-combined` can publish what it's tracking to another process — a
+simulator, another repo, anything — three independent ways. All off unless
+you ask; use one, or several at once. Full JSON shape and details in
+[`combined-tracking`'s README](combined-tracking/#feeding-another-program).
+
+| Command | What you get |
+| --- | --- |
+| `uv run track-combined --ball-profile NAME --json-out state.json` | One file, **overwritten** every frame — always "the current state" |
+| `uv run track-combined --ball-profile NAME --serve-http 8000` | The same, over `GET http://localhost:8000/state` — works from another machine or language, no filesystem access needed |
+| `uv run track-combined --ball-profile NAME --json-log session.jsonl` | One JSON line **appended** per frame — a full history, not just "right now" |
+
 ### Flags that matter
 
 `--field` and `--tag-size` are what make the numbers mean real metres —
@@ -135,6 +148,9 @@ against the wrong physical size until you correct it.
 | `--radius-mm` | The ball's real **radius**, stored in the profile | `20` | `calibrate-ball` |
 | `--cam-height` | Camera height above the field, metres — ignored once `field_pose.json` exists | `1.5` | `track`, `track-ball` |
 | `--print-poses` / `--print-states` | Stream the numbers to the terminal | off | `track` / `track-ball` |
+| `--json-out PATH` | Write current detections to a file, overwritten every frame | off | `track-combined` |
+| `--serve-http PORT` | Serve current detections over plain HTTP `GET` | off | `track-combined` |
+| `--json-log PATH` | Append one JSON line per frame — a history, not just current state | off | `track-combined` |
 
 Full per-command flag lists: `uv run <command> --help`, or see
 [`tag-tracking`'s README](tag-tracking/) for the calibration workflow in detail.

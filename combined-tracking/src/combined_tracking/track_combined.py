@@ -434,10 +434,18 @@ def main() -> None:
                          "network -- a different machine, a browser-based simulator -- "
                          "instead of (or as well as) --json-out's local file. Off by "
                          "default")
+    ap.add_argument("--json-log", type=str, default=None,
+                    help="also (or instead) APPEND every frame's detections to this "
+                         "PATH, one JSON object per line (JSON Lines), instead of "
+                         "--json-out's 'always just the latest frame'. For a full "
+                         "history rather than current state. Off by default")
     args = ap.parse_args()
     json_out = Path(args.json_out) if args.json_out else None
     if json_out:
         json_out.parent.mkdir(parents=True, exist_ok=True)
+    json_log_path = Path(args.json_log) if args.json_log else None
+    if json_log_path:
+        json_log_path.parent.mkdir(parents=True, exist_ok=True)
 
     if args.list_cameras:
         list_cameras()
@@ -464,6 +472,7 @@ def main() -> None:
     cap = open_camera(args.camera, args.width, args.height)
     locked = False
     http_server = None
+    json_log_file = None
     if not args.no_lock:
         # Let the camera settle on the scene before freezing it, or the lock
         # freezes whatever exposure it happened to open with. Tag detection
@@ -511,6 +520,9 @@ def main() -> None:
         print(f"intrinsics: {intr_source}")
         if json_out is not None:
             print(f"writing live state to {json_out} every frame")
+        if json_log_path is not None:
+            json_log_file = json_log_path.open("a")
+            print(f"appending one JSON line per frame to {json_log_path}")
         http_server = LiveStateServer(args.serve_http) if args.serve_http else None
         if http_server is not None:
             print(f"serving live state at http://localhost:{args.serve_http}/state "
@@ -571,12 +583,19 @@ def main() -> None:
                       f"{ball_state.vx:+.4f}\t{ball_state.vy:+.4f}\t"
                       f"{int(ball_state.grounded)}\t{int(ball_state.visible)}",
                       flush=True)
-            if json_out is not None or http_server is not None:
+            if json_out is not None or http_server is not None or json_log_file is not None:
                 doc = build_state_doc(field, tag_states, ball_state)
                 if json_out is not None:
                     write_json_state(json_out, doc)
                 if http_server is not None:
                     http_server.publish(doc)
+                if json_log_file is not None:
+                    # Flushed every line, not just buffered: a reader tailing
+                    # the file (tail -f, or its own poll loop) sees each
+                    # frame as soon as it lands, not whenever the OS decides
+                    # to flush a full buffer.
+                    json_log_file.write(json.dumps(doc) + "\n")
+                    json_log_file.flush()
 
             panel = draw_combined_plan(plan, tag_states, tag_trails, ball_state,
                                        ball_trail, transform, show_trails)
@@ -635,6 +654,8 @@ def main() -> None:
     finally:
         if http_server is not None:
             http_server.stop()
+        if json_log_file is not None:
+            json_log_file.close()
         if locked:
             print("camera unlock: " + ", ".join(unlock_camera(cap)))
         cap.release()
