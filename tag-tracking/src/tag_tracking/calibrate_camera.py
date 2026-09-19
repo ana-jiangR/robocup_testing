@@ -67,6 +67,7 @@ def _run_live(args):
     board, _dictionary = make_board(
         tuple(args.squares), args.square_mm / 1000.0, args.marker_mm / 1000.0
     )
+    n_markers = len(board.getIds())
     detector = cv2.aruco.CharucoDetector(board)
 
     print("Move the board around: different distances, tilts, and the corners")
@@ -84,24 +85,40 @@ def _run_live(args):
             if not ok:
                 raise RuntimeError("camera stopped returning frames")
             grey = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
-            ch_corners, ch_ids, _mk_corners, _mk_ids = detector.detectBoard(grey)
+            ch_corners, ch_ids, _mk_corners, mk_ids = detector.detectBoard(grey)
             disp = cv2.cvtColor(grey, cv2.COLOR_GRAY2BGR)
-            # OpenCV's detectBoard() can return charucoCorners/charucoIds of
-            # mismatched length on some views (an OpenCV-side quirk, not a
-            # board or camera problem) -- drawDetectedCornersCharuco asserts
-            # on that, so a length check has to gate it, not just a None check.
+            n_seen = 0 if mk_ids is None else len(mk_ids)
+            # OpenCV's detectBoard() can return charucoCorners/charucoIds that
+            # disagree even when they look consistent from Python (matching
+            # len(), no Nones) -- drawDetectedCornersCharuco has a known
+            # shape-handling bug on some builds that still asserts on that.
+            # So: never call it. Draw the corners ourselves with plain
+            # cv2.circle, which only ever looks at a flattened point list and
+            # cannot hit that bug.
             good = (
                 ch_corners is not None and ch_ids is not None
                 and len(ch_corners) >= 6 and len(ch_corners) == len(ch_ids)
             )
             if good:
-                cv2.aruco.drawDetectedCornersCharuco(disp, ch_corners, ch_ids, (0, 255, 0))
+                for pt in np.asarray(ch_corners, dtype=np.float64).reshape(-1, 2):
+                    cv2.circle(disp, (int(round(pt[0])), int(round(pt[1]))), 5,
+                               (0, 255, 0), -1, cv2.LINE_AA)
                 if len(frames) < MAX_LIVE_FRAMES:
                     frames.append(grey)
             cv2.putText(
-                disp, f"captured {len(frames)}  (need {args.min_frames}+)", (10, 28),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0) if good else (0, 0, 255), 2, cv2.LINE_AA,
+                disp,
+                f"captured {len(frames)}  (need {args.min_frames}+)   "
+                f"markers seen {n_seen}/{n_markers}",
+                (10, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.65,
+                (0, 255, 0) if good else (0, 0, 255), 2, cv2.LINE_AA,
             )
+            if not good:
+                hint = (
+                    "no markers visible -- move the board into frame" if n_seen == 0 else
+                    "partial view -- hold it flatter-on, closer, or in better light"
+                )
+                cv2.putText(disp, hint, (10, 54), cv2.FONT_HERSHEY_SIMPLEX, 0.55,
+                            (0, 165, 255), 1, cv2.LINE_AA)
             cv2.imshow(win, disp)
             key = read_key()
             if key == 27:
