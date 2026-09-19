@@ -95,10 +95,20 @@ def calibrate_intrinsics(
         ):
             continue
         obj, img = board.matchImagePoints(ch_corners, ch_ids)
-        pts = img.reshape(-1, 2)
-        if np.ptp(pts[:, 0]) < 20 or np.ptp(pts[:, 1]) < 20:
-            continue  # corners nearly collinear (a grazing view of one row/column)
-            # -- cv2.calibrateCamera cannot fit a homography to this and throws
+        pts = img.reshape(-1, 2).astype(np.float64)
+        # Degenerate for homography fitting if the points are (nearly)
+        # collinear in ANY direction, not just axis-aligned -- a grazing
+        # partial view often lines its few visible corners up along a
+        # diagonal, which an x/y-range check alone does not catch, and
+        # cv2.calibrateCamera throws a hard C++ assertion on it rather than
+        # failing gracefully. The eigenvalues of the point cloud's covariance
+        # are the spread along its two principal axes regardless of
+        # orientation; the smaller one collapsing towards zero is exactly
+        # "collinear", whichever way the line points.
+        centered = pts - pts.mean(axis=0)
+        spread = np.sqrt(np.linalg.eigvalsh((centered.T @ centered) / len(pts))[0])
+        if spread < 6.0:
+            continue  # corners nearly collinear in some direction
         all_obj.append(obj)
         all_img.append(img)
     if len(all_obj) < min_frames:
