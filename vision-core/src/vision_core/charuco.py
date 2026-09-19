@@ -85,7 +85,14 @@ def calibrate_intrinsics(
         seen += 1
         grey = frame if frame.ndim == 2 else cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         ch_corners, ch_ids, _mk_corners, _mk_ids = detector.detectBoard(grey)
-        if ch_corners is None or len(ch_corners) < 6:
+        # OpenCV's detectBoard() can return charucoCorners/charucoIds of
+        # mismatched length on some views -- an OpenCV-side quirk, not a
+        # board or camera problem -- so a length check has to gate this, not
+        # just a None/count check, or matchImagePoints chokes on the pair.
+        if (
+            ch_corners is None or ch_ids is None
+            or len(ch_corners) < 6 or len(ch_corners) != len(ch_ids)
+        ):
             continue
         obj, img = board.matchImagePoints(ch_corners, ch_ids)
         pts = img.reshape(-1, 2)

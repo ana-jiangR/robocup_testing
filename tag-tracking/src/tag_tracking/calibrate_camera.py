@@ -86,7 +86,14 @@ def _run_live(args):
             grey = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
             ch_corners, ch_ids, _mk_corners, _mk_ids = detector.detectBoard(grey)
             disp = cv2.cvtColor(grey, cv2.COLOR_GRAY2BGR)
-            good = ch_corners is not None and len(ch_corners) >= 6
+            # OpenCV's detectBoard() can return charucoCorners/charucoIds of
+            # mismatched length on some views (an OpenCV-side quirk, not a
+            # board or camera problem) -- drawDetectedCornersCharuco asserts
+            # on that, so a length check has to gate it, not just a None check.
+            good = (
+                ch_corners is not None and ch_ids is not None
+                and len(ch_corners) >= 6 and len(ch_corners) == len(ch_ids)
+            )
             if good:
                 cv2.aruco.drawDetectedCornersCharuco(disp, ch_corners, ch_ids, (0, 255, 0))
                 if len(frames) < MAX_LIVE_FRAMES:
