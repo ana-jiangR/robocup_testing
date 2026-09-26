@@ -10,7 +10,7 @@ pose.py.
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, field as _field
+from dataclasses import dataclass
 from functools import lru_cache
 from typing import Callable
 
