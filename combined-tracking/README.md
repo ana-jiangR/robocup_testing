@@ -120,13 +120,14 @@ Shape (one object, whether it's the single current state from `--json-out`/
 
 ```json
 {
+  "run_id": "20260919-162120", "frame": 1234,
   "timestamp": 1730000000.123,
   "field": { "width": 1.2, "height": 0.8 },
   "tags": [
     {
       "id": 5, "x": 0.600, "y": 0.400, "theta_deg": 19.98,
       "vx": 0.0, "vy": 0.0, "speed": 0.0, "direction_deg": 0.0, "omega_deg": 0.0,
-      "inside": true, "visible": true, "off_plane_m": 0.004
+      "inside": true, "visible": true, "age": 0.0, "off_plane_m": 0.004
     }
   ],
   "ball": {
@@ -138,7 +139,9 @@ Shape (one object, whether it's the single current state from `--json-out`/
 ```
 
 `tags` is a list (zero or more — every currently-tracked tag id, not just
-one). `ball` is `null` when no ball has ever been seen yet, otherwise always
+one). A tag the detector misses keeps its entry, with `visible: false` and a
+growing `age`, for `--tag-coast` seconds (default 0.5) before it is dropped;
+raise that if your reader would rather see a predicted position than a gap. `ball` is `null` when no ball has ever been seen yet, otherwise always
 present (with `visible: false` while the filter is coasting through a
 dropout, same meaning as everywhere else in this project). All positions are
 in **metres, field coordinates** — same convention as every readout and
@@ -147,7 +150,9 @@ origin at one field corner, `+X` along `width`, `+Y` along `height`. `age` is
 seconds since the ball was last actually seen (0 while it's currently
 visible). `timestamp` is `time.time()` (Unix epoch seconds) at the moment
 that frame was captured, in case the reader wants to compute its own latency
-or discard a stale file.
+or discard a stale file. `run_id` is the same for every frame of one launch
+(so an appended `--json-log` splits cleanly into runs) and `frame` counts
+camera frames from 1 within it.
 
 ## Why a separate skill, not a flag on `track` or `track-ball`
 

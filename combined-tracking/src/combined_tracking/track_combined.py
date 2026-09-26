@@ -208,6 +208,7 @@ def tag_state_to_dict(s: TagFieldState) -> dict:
         "omega_deg": s.omega_deg,
         "inside": s.inside,
         "visible": s.visible,
+        "age": s.age,
         "off_plane_m": s.off_plane_m,
     }
 
@@ -232,6 +233,8 @@ def build_state_doc(
     field: Field,
     tag_states: list[TagFieldState],
     ball_state: BallFieldState | None,
+    run_id: str,
+    frame: int,
 ) -> dict:
     """The current frame's detections as one plain dict -- the single source
     of truth both --json-out and --serve-http publish, so a reader gets the
@@ -239,8 +242,14 @@ def build_state_doc(
 
     Field coordinates throughout: metres, field frame, same convention as
     every printed readout in this project (see the root README).
+
+    `run_id` is fixed for one launch and `frame` counts up by one per camera
+    frame, so a reader can split an appended --json-log into runs and tell a
+    stalled loop (timestamp jumps, frame +1) from missing lines (frame skips).
     """
     return {
+        "run_id": run_id,
+        "frame": frame,
         "timestamp": time.time(),
         "field": {"width": field.width, "height": field.height},
         "tags": [tag_state_to_dict(s) for s in tag_states],
@@ -369,6 +378,13 @@ def main() -> None:
                     help="tag filter process noise, m/s^2 (raise for a fast robot)")
     ap.add_argument("--tag-sigma-alpha", type=float, default=180.0,
                     help="tag filter process noise for turning, deg/s^2")
+    ap.add_argument("--tag-coast", type=float, default=0.5, metavar="SECONDS",
+                    help="keep reporting a tag on its predicted motion (visible: false) "
+                         "for this long after it was last seen, before dropping it "
+                         "from the output (default 0.5). Raise it so a JSON reader "
+                         "sees fewer tags vanish; the cost is a stale estimate if "
+                         "the robot really did leave, and slower re-acquire after "
+                         "it is picked up and moved")
     # -- ball-specific ---------------------------------------------------
     ap.add_argument("--ball-profile", default="test",
                     help="named color profile from calib/ball_color.json "
@@ -502,7 +518,8 @@ def main() -> None:
         tag_detector = pa.Detector(families="tag36h11", nthreads=4, quad_decimate=1.0,
                                    decode_sharpening=0.25)
         tag_tracker = TagTracker(field, sigma_a=args.tag_sigma_a,
-                                 sigma_alpha_deg=args.tag_sigma_alpha)
+                                 sigma_alpha_deg=args.tag_sigma_alpha,
+                                 max_coast_s=args.tag_coast)
         ball_tracker = _new_ball_tracker(args, color, transform, K)
 
         plan = PlanView(field, height=h, mode=mode)
@@ -511,6 +528,8 @@ def main() -> None:
 
         show_grid, show_trails, show_mask = True, True, True
         fps, last_t = 0.0, time.perf_counter()
+        run_id = time.strftime("%Y%m%d-%H%M%S")
+        frame_no = 0
 
         # Whole-frame undistortion: the tag detector searches the entire
         # image, so it (and the overlay drawn on top of it) need to share one
@@ -540,6 +559,7 @@ def main() -> None:
             if not ok:
                 print("camera stopped returning frames")
                 break
+            frame_no += 1
             now = time.perf_counter()
             dt = now - last_t
             last_t = now
@@ -587,7 +607,7 @@ def main() -> None:
                       f"{int(ball_state.grounded)}\t{int(ball_state.visible)}",
                       flush=True)
             if json_out is not None or http_server is not None or json_log_file is not None:
-                doc = build_state_doc(field, tag_states, ball_state)
+                doc = build_state_doc(field, tag_states, ball_state, run_id, frame_no)
                 if json_out is not None:
                     write_json_state(json_out, doc)
                 if http_server is not None:
