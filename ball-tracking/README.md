@@ -22,16 +22,27 @@ estimated by the filter, and a stationary ball correctly has none.
 ```powershell
 uv run calibrate-ball                                  # profile 'test'
 uv run calibrate-ball --profile mine --radius-mm 40    # YOUR ball's real radius
+uv run calibrate-ball --profile mine --s-spread 6      # ball lives under changing light: reach further
 uv run calibrate-ball --list-profiles
 ```
 
 Drag a box over the ball; the right panel shows the mask live. Press `h` for a
 hue histogram of the whole scene — pick the color **empirically against your
-actual room**, not from a table. Press `s` to save.
+actual room**, not from a table. Then **roll the ball into shade and under
+every lamp it will meet** before saving: the mask should fade, not vanish. If
+it vanishes, press `>` to widen the saturation spread, `'` for hue (or lower the
+saturation floor with `[`) until it survives. Press `s` to save.
 
 Keys: drag = sample · `a` add another drag to the same sample · `h` scene hue
 histogram · `-` `+` back-projection threshold · `[` `]` saturation floor ·
-`s` save · `q`/`Esc` quit.
+`<` `>` saturation spread · `;` `'` hue spread · `s` save · `q`/`Esc` quit.
+
+**Sample under the light the ball will actually play in.** A profile is a
+measurement of the ball *through this camera under this light*; the spread
+(below) buys tolerance for the ball moving between lamps and shadows, not for
+calibrating in a different room. Press `a` over the ball in its darkest and
+brightest spots to fold those into the same sample, which is cheaper than any
+amount of spread.
 
 A **multi-color ball works**, because a profile is a whole histogram rather than
 one hue: drag over one panel, then press `a` over each of the others to add them.
@@ -70,7 +81,7 @@ with four reference tags on the field corners), it is loaded automatically and
 not assumed. Until then the made-up rig below applies.
 
 Keys: `q` quit · `g` grid · `t` trails · `m` mask · `w` wall/floor · `p` pause ·
-`[` `]` nudge fx · `r` reset trail · `s` save intrinsics.
+`[` `]` nudge fx · `r` reset trail and track · `s` save intrinsics.
 
 ## The assumed rig
 
@@ -115,6 +126,19 @@ hard `inRange` — `inRange` is a cliff where one degree of hue drift makes the
 ball vanish, while back-projection lets it fade. Brightness is deliberately
 excluded and applied as a wide-open gate: a ball rolling into shade should not
 stop existing.
+
+The measured histogram is a tight island, though: a handful of H/S bins, and
+zero everywhere else. That is its own cliff. Shade and a bluish ambient pull
+saturation *down*, a warmer bulb pushes it *up*, a re-balanced camera nudges
+the hue — and a few bins of drift lands the same ball on zero likelihood. So
+the profile is **spread** before use (`BallColor.working_hist`): a Gaussian
+blur across the histogram, wide along saturation (`--s-spread`, 4 bins ≈ 32
+levels) and narrow along hue (`--h-spread`, 1 bin = 6°), with hue wrapped so
+red does not stop at the end of the axis, then re-normalised so `threshold`
+means the same thing. The raw measurement is what gets saved; the spread is
+applied on load, so old profiles benefit without re-sampling and a profile
+can be re-tuned without re-measuring the ball. Hue barely moves with light,
+saturation is what light changes, hence the asymmetry.
 
 **3 · Blob.** Morphology OPEN then CLOSE, then contours scored on area,
 circularity, fill ratio, and distance from the filter's prediction. Scored, not
@@ -221,6 +245,7 @@ class BallFieldState:
 
 | Symptom | Cause |
 | --- | --- |
+| Ball vanishes in shade, or under a different lamp | Saturation drifted out of the profile. Widen `--s-spread` (`>` in `calibrate-ball`), lower the saturation floor with `[`, or re-sample with `a` in the dark spot too. If it only happens after the *camera* moved rooms, re-run `calibrate-ball` there; no spread covers a different white balance. |
 | Mask has holes in the ball | White/black panels carry no hue. Lower the saturation floor with `[`, or accept it if colored patches still reach the outline. |
 | Mask lights up the room too | The background shares the ball's hue. Re-sample a tighter box, raise the threshold with `+`, or use a ball in an emptier hue — press `h` to see which are free. |
 | Ball found, but positions wrong | `--cam-height` doesn't match reality, or the lens is uncalibrated. Run `calibrate-field`, or measure and pass the height. |
@@ -229,6 +254,7 @@ class BallFieldState:
 | Keys do nothing, mouse works | Click the video window; if letters are still ignored, switch your input method to English, or use `Esc`. |
 | Picture is dark, or green, in every app | A run crashed with the camera locked, and the driver kept the manual exposure. `uv run unlock-camera`, or just start either tool — `open_camera` puts it back on auto first. |
 | `camera lock:` says `REVERTED` | That half of the lock damaged the picture (manual exposure couldn't reach auto's brightness, or manual WB tinted it green), so it was left on auto. Tracking still works; the hue may drift a little if the lighting changes. |
+| Mask fine at first, then drifts over minutes | The camera is on auto (`--no-lock`, or the lock `REVERTED`) and re-exposing as things move through frame. Fix the lock, or widen the spread to absorb it. |
 | `calibrate-ball`/`track-ball` not found | `ball-tracking` isn't in the workspace. Check the root `pyproject.toml`, then `uv sync`. |
 
 ## Layout
