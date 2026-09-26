@@ -14,6 +14,7 @@ track.py (and any future skill) picks it up automatically.
 from __future__ import annotations
 
 import argparse
+import time
 from pathlib import Path
 
 import cv2
@@ -29,21 +30,23 @@ from vision_core.charuco import (
 
 MAX_LIVE_FRAMES = 60
 #: A view only counts if its corners sit at least this far (median, px) from
-#: where the same corners were in every view already captured. Without it a
+#: the last captured view, and at least MIN_VIEW_GAP_S after it. Without that a
 #: 30 fps camera fills all MAX_LIVE_FRAMES from one pose in two seconds, and
-#: the calibration never sees the tilts and frame corners it needs.
+#: the calibration never sees the tilts and frame corners it needs. Compared
+#: to the last view only, not every view: against all of them, a board that
+#: returns to an area already covered is rejected forever and the count stalls.
 MIN_VIEW_CHANGE_PX = 25.0
+MIN_VIEW_GAP_S = 0.3
 
 
-def _is_new_view(view: dict[int, np.ndarray], captured: list[dict[int, np.ndarray]]) -> bool:
-    for prev in captured:
-        shared = view.keys() & prev.keys()
-        if len(shared) < 4:
-            continue
-        moved = np.median([np.linalg.norm(view[i] - prev[i]) for i in shared])
-        if moved < MIN_VIEW_CHANGE_PX:
-            return False
-    return True
+def _is_new_view(view: dict[int, np.ndarray], last: dict[int, np.ndarray] | None) -> bool:
+    if last is None:
+        return True
+    shared = view.keys() & last.keys()
+    if len(shared) < 4:
+        return True
+    moved = np.median([np.linalg.norm(view[i] - last[i]) for i in shared])
+    return moved >= MIN_VIEW_CHANGE_PX
 
 
 def _run_synthetic(args):
@@ -93,7 +96,8 @@ def _run_live(args):
 
     cap = open_camera(args.camera, args.width, args.height)
     frames = []
-    views: list[dict[int, np.ndarray]] = []
+    last_view: dict[int, np.ndarray] | None = None
+    last_view_t = 0.0
     coverage: list[np.ndarray] = []  # every captured corner, drawn so gaps show
     size = None
     win = "calibrate-camera"
@@ -137,21 +141,23 @@ def _run_live(args):
                     cv2.circle(disp, (int(round(pt[0])), int(round(pt[1]))), 5,
                                (0, 255, 0), -1, cv2.LINE_AA)
                 view = dict(zip(np.asarray(ch_ids).ravel().tolist(), pts))
-                new_view = _is_new_view(view, views)
+                new_view = (_is_new_view(view, last_view)
+                            and time.monotonic() - last_view_t >= MIN_VIEW_GAP_S)
                 if new_view and len(frames) < MAX_LIVE_FRAMES:
                     frames.append(grey)
-                    views.append(view)
+                    last_view, last_view_t = view, time.monotonic()
                     coverage.extend(pts)
             cv2.putText(
                 disp,
-                f"captured {len(frames)}  (need {args.min_frames}+)   "
-                f"markers seen {n_seen}/{n_markers}",
+                f"captured {len(frames)}/{args.min_frames}"
+                f"{'  -- q to finish' if len(frames) >= args.min_frames else ''}"
+                f"   (markers in view {n_seen}/{n_markers}, need not be all)",
                 (10, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.65,
                 (0, 255, 0) if good else (0, 0, 255), 2, cv2.LINE_AA,
             )
             if good and not new_view and len(frames) < MAX_LIVE_FRAMES:
-                cv2.putText(disp, "same pose as a captured view -- move, tilt, or go to "
-                            "an uncovered part of the frame", (10, 54),
+                cv2.putText(disp, "keep moving -- tilt it, or take it to a new part of "
+                            "the frame", (10, 54),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 165, 255), 1, cv2.LINE_AA)
             if not good:
                 hint = (
