@@ -19,6 +19,10 @@ Keys:
     q / Esc  quit            g  grid on/off           t  trails on/off
     m        mask overlay    w  wall / floor          r  reset trails/tracks
     [ / ]    fx -/+ 2%       s  save intrinsics
+
+With --no-window there is no window and no keys: nothing is drawn at all, and
+Ctrl+C quits. That is the mode for when the only reader is another program
+(--zmq-pub, --serve-http, --json-out, --json-log).
 """
 
 from __future__ import annotations
@@ -42,7 +46,7 @@ from ball_tracking.ball_color import color_file, load_all, load_profile
 from ball_tracking.track_ball import AIR_COLOR, BALL_COLOR, draw_ball_marks
 from ball_tracking.track_ball import GHOST_COLOR as BALL_GHOST_COLOR
 from tag_tracking.filter import SPEED_EPS as TAG_SPEED_EPS, TagFieldState, TagTracker
-from tag_tracking.pose import tag_field_pose
+from tag_tracking.pose import TagFieldPose, tag_field_pose
 from tag_tracking.track import GHOST_COLOR as TAG_GHOST_COLOR
 from tag_tracking.track import VELOCITY_COLOR, draw_tag_marks, suppressed_stderr
 from vision_core import intrinsics as intr
@@ -58,6 +62,12 @@ from vision_core.planview import OUT_COLOR, PlanView, color_for, draw_field
 
 TAG_TRAIL_LEN = 90
 BALL_TRAIL_LEN = 120
+
+#: A tag lying on the field reads off_plane_m within a centimetre or so of 0
+#: (selfcheck's synthetic tags: under 1 cm). A median |off_plane_m| past this,
+#: over OFF_PLANE_WINDOW sightings, is not jitter -- see OffPlaneWatch.
+OFF_PLANE_WARN_M = 0.05
+OFF_PLANE_WINDOW = 60
 
 
 # --------------------------------------------------------------------------
@@ -117,7 +127,8 @@ def draw_combined_readout(
         return
 
     status = (
-        f"COASTING {ball_state.age * 1000:.0f}ms" if not ball_state.visible
+        f"LOST {ball_state.age:.1f}s (held)" if ball_state.lost
+        else f"COASTING {ball_state.age * 1000:.0f}ms" if not ball_state.visible
         else "AIRBORNE" if not ball_state.grounded
         else "grounded"
     )
@@ -195,7 +206,10 @@ def draw_combined_plan(
 # --------------------------------------------------------------------------
 
 
-def tag_state_to_dict(s: TagFieldState) -> dict:
+def tag_state_to_dict(s: TagFieldState, max_coast_s: float) -> dict:
+    """`lost` is here so a reader can treat tags and the ball alike, but
+    TagTracker drops a tag the moment it would become lost -- so a tag that is
+    in the list at all always has lost=False. A lost tag is a missing tag."""
     return {
         "id": s.tag_id,
         "x": s.x,
@@ -209,6 +223,8 @@ def tag_state_to_dict(s: TagFieldState) -> dict:
         "inside": s.inside,
         "visible": s.visible,
         "off_plane_m": s.off_plane_m,
+        "age": s.age,
+        "lost": s.age > max_coast_s,
     }
 
 
@@ -225,6 +241,7 @@ def ball_state_to_dict(s: BallFieldState, field: Field) -> dict:
         "visible": s.visible,
         "inside": s.inside(field),
         "age": s.age,
+        "lost": s.lost,
     }
 
 
@@ -232,19 +249,33 @@ def build_state_doc(
     field: Field,
     tag_states: list[TagFieldState],
     ball_state: BallFieldState | None,
+    *,
+    seq: int,
+    t_capture: float,
+    tag_max_coast_s: float,
+    stats: dict,
 ) -> dict:
     """The current frame's detections as one plain dict -- the single source
-    of truth both --json-out and --serve-http publish, so a reader gets the
-    identical shape whichever transport it uses.
+    of truth every publisher (--json-out, --serve-http, --json-log,
+    --zmq-pub) sends, so a reader gets the identical shape whichever
+    transport it uses.
 
     Field coordinates throughout: metres, field frame, same convention as
     every printed readout in this project (see the root README).
+
+    `timestamp` predates t_capture/t_publish and is kept for readers that
+    already use it; it is the same instant as t_publish, not the capture.
     """
+    t_publish = time.time()
     return {
-        "timestamp": time.time(),
+        "seq": seq,
+        "timestamp": t_publish,
+        "t_capture": t_capture,
+        "t_publish": t_publish,
         "field": {"width": field.width, "height": field.height},
-        "tags": [tag_state_to_dict(s) for s in tag_states],
+        "tags": [tag_state_to_dict(s, tag_max_coast_s) for s in tag_states],
         "ball": None if ball_state is None else ball_state_to_dict(ball_state, field),
+        "stats": {**stats, "latency_ms": (t_publish - t_capture) * 1000.0},
     }
 
 
@@ -328,6 +359,161 @@ class LiveStateServer:
         self._httpd.server_close()
 
 
+def import_zmq():
+    """pyzmq, or a clear exit saying how to get it. It is an optional extra,
+    not a dependency: nothing but --zmq-pub needs it."""
+    try:
+        import zmq
+    except ImportError:
+        raise SystemExit(
+            "--zmq-pub needs pyzmq, which is an optional extra. Install it with\n"
+            "  uv sync --all-packages --extra zmq\n"
+            "or run once with it:  uv run --with pyzmq track-combined ..."
+        ) from None
+    return zmq
+
+
+class ZmqStatePublisher:
+    """Pushes every build_state_doc() out on a ZMQ PUB socket, as one
+    single-part message of UTF-8 JSON -- no topic frame, so a subscriber
+    subscribes to "" and can set CONFLATE to only ever hold the newest.
+
+    The push counterpart of LiveStateServer: a reader polling HTTP gets the
+    latest doc whenever it asks and may skip frames or see one twice; a
+    subscriber here is handed each frame once, as soon as it is published.
+    PUB never blocks the tracker: a subscriber that falls behind has frames
+    dropped for it at the high-water mark, which `seq` gaps then show.
+    """
+
+    def __init__(self, endpoint: str) -> None:
+        zmq = import_zmq()
+        self._ctx = zmq.Context()
+        self._sock = self._ctx.socket(zmq.PUB)
+        # A few frames of slack per subscriber, not the default 1000: stale
+        # frames queued for a slow reader are worse than frames it never got.
+        self._sock.setsockopt(zmq.SNDHWM, 4)
+        self._sock.setsockopt(zmq.LINGER, 0)  # never hang on quit
+        try:
+            self._sock.bind(endpoint)
+        except zmq.ZMQError as e:
+            self.stop()
+            raise SystemExit(f"--zmq-pub {endpoint}: {e}") from None
+
+    def publish(self, doc: dict) -> None:
+        self._sock.send_string(json.dumps(doc))
+
+    def stop(self) -> None:
+        self._sock.close()
+        self._ctx.term()
+
+
+# --------------------------------------------------------------------------
+# Capture: read the camera on its own thread, keep only the newest frame.
+# --------------------------------------------------------------------------
+
+
+class LatestFrameGrabber:
+    """Reads the camera continuously on a background thread and keeps only
+    the newest frame.
+
+    Read and process in one loop, and every frame that arrives while the
+    last one is still being processed queues in the driver; each cap.read()
+    then hands back an older frame than the one the camera just took, and
+    the lag builds up to however deep the driver's queue is. Here the queue
+    is emptied as fast as it fills, and a frame nobody took before the next
+    one arrived is overwritten and counted in `dropped` -- the tracker
+    falling behind the camera, which is a different thing from a detector
+    looking at a frame and not finding anything in it.
+    """
+
+    def __init__(self, cap: cv2.VideoCapture) -> None:
+        self._cap = cap
+        self._cond = threading.Condition()
+        self._frame: np.ndarray | None = None
+        self._t_capture = 0.0  # time.time() right after the read, for readers
+        self._t_perf = 0.0  # perf_counter() at the same moment, for dt
+        self._failed = False
+        self._stopping = False
+        #: Frames overwritten before the main loop took them. Cumulative.
+        self.dropped = 0
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def _run(self) -> None:
+        while not self._stopping:
+            ok, frame = self._cap.read()
+            t_capture, t_perf = time.time(), time.perf_counter()
+            with self._cond:
+                if not ok:
+                    self._failed = True
+                    self._cond.notify_all()
+                    return
+                if self._frame is not None:
+                    self.dropped += 1
+                self._frame = frame
+                self._t_capture, self._t_perf = t_capture, t_perf
+                self._cond.notify_all()
+
+    def read(self) -> tuple[np.ndarray, float, float] | None:
+        """The newest frame not yet handed out, as (frame, t_capture, t_perf).
+        Waits for one if need be. None once the camera stops delivering."""
+        with self._cond:
+            while self._frame is None and not self._failed:
+                # Short waits, not one long one: on Windows a blocked wait is
+                # not interrupted by Ctrl+C until it returns.
+                self._cond.wait(0.1)
+            if self._frame is None:
+                return None
+            frame, self._frame = self._frame, None
+            return frame, self._t_capture, self._t_perf
+
+    def stop(self) -> None:
+        """Stop reading. Call before touching the camera from any other thread
+        (unlock, release) -- VideoCapture is not safe to share."""
+        self._stopping = True
+        self._thread.join(timeout=2.0)
+
+
+class OffPlaneWatch:
+    """Says so, once per tag, when a tag keeps reading well off the field plane.
+
+    A tag lying on the field reads off_plane_m within about a centimetre of
+    zero. A steady offset of tens of centimetres is not jitter and not a tag
+    held in the air: it means the field plane or the tag's range is wrong.
+    Positive is towards the camera -- a tag lifted off the field reads
+    positive. Negative means the tag appears *further* away than the plane
+    it is supposed to be lying on, which no real tag can be, so that is the
+    plane (or --tag-size, or fx) being wrong, not the tag.
+    """
+
+    def __init__(self, synthetic: bool) -> None:
+        self.synthetic = synthetic
+        self._seen: dict[int, deque] = defaultdict(lambda: deque(maxlen=OFF_PLANE_WINDOW))
+        self._warned: set[int] = set()
+
+    def add(self, poses: list[TagFieldPose]) -> None:
+        for p in poses:
+            hist = self._seen[p.tag_id]
+            hist.append(p.off_plane_m)
+            if p.tag_id in self._warned or len(hist) < OFF_PLANE_WINDOW:
+                continue
+            med_abs = float(np.median(np.abs(hist)))
+            if med_abs <= OFF_PLANE_WARN_M:
+                continue
+            self._warned.add(p.tag_id)
+            med = float(np.median(hist))
+            print(f"warning: tag {p.tag_id} reads {med:+.2f} m off the field plane "
+                  f"(median of its last {OFF_PLANE_WINDOW} sightings; on the field "
+                  f"it should be within ~1 cm)")
+            if self.synthetic:
+                print("  the field pose is the made-up one (--cam-height/--pitch/--hfov "
+                      "guesses), so tag x/y and ball x/y are on different scales; "
+                      "run `uv run calibrate-field` (and calibrate-camera)")
+            else:
+                print("  check --tag-size against the printed tag's black square, and "
+                      "that the tag lies flat on the field")
+
+
 # --------------------------------------------------------------------------
 
 
@@ -358,7 +544,8 @@ def main() -> None:
     ap = argparse.ArgumentParser(
         description=__doc__.splitlines()[0],
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="Keys: q quit, g grid, t trails, m mask, w wall/floor, [ ] fx, r reset, s save",
+        epilog="Keys: q quit, g grid, t trails, m mask, w wall/floor, [ ] fx, r reset, s save "
+               "(with --no-window: none, Ctrl+C quits)",
     )
     # -- tag-specific --------------------------------------------------
     ap.add_argument("--tag-size", type=float, default=0.080,
@@ -442,7 +629,21 @@ def main() -> None:
                          "PATH, one JSON object per line (JSON Lines), instead of "
                          "--json-out's 'always just the latest frame'. For a full "
                          "history rather than current state. Off by default")
+    ap.add_argument("--zmq-pub", type=str, default=None, metavar="ENDPOINT",
+                    help="also (or instead) PUSH every frame's detections as JSON on a "
+                         "ZMQ PUB socket bound to this ENDPOINT, e.g. tcp://*:5556, so a "
+                         "subscriber gets each frame as it happens instead of polling. "
+                         "Needs the optional pyzmq extra. Off by default")
+    ap.add_argument("--no-window", action="store_true",
+                    help="headless: no window, nothing drawn, no keys; Ctrl+C quits. "
+                         "For when the only reader is another program")
+    ap.add_argument("--mjpg", action="store_true",
+                    help="ask the camera for MJPG frames, which most USB webcams need "
+                         "to reach 720p at full frame rate")
     args = ap.parse_args()
+    if args.zmq_pub:
+        import_zmq()  # fail now, not after the camera has been opened and locked
+    headless = args.no_window
     json_out = Path(args.json_out) if args.json_out else None
     if json_out:
         json_out.parent.mkdir(parents=True, exist_ok=True)
@@ -472,10 +673,16 @@ def main() -> None:
     else:
         transform = build_transform(args, field, mode)
 
-    cap = open_camera(args.camera, args.width, args.height)
+    # A one-frame driver queue, so a frame is never older than the one the
+    # camera took last. Where the backend ignores it, LatestFrameGrabber below
+    # still drains the queue as fast as it fills.
+    cap = open_camera(args.camera, args.width, args.height,
+                      fourcc="MJPG" if args.mjpg else None, buffersize=1)
     locked = False
     http_server = None
+    zmq_pub = None
     json_log_file = None
+    grabber = None
     if not args.no_lock:
         # Let the camera settle on the scene before freezing it, or the lock
         # freezes whatever exposure it happened to open with. Tag detection
@@ -510,7 +717,10 @@ def main() -> None:
         ball_trail: deque = deque(maxlen=BALL_TRAIL_LEN)
 
         show_grid, show_trails, show_mask = True, True, True
-        fps, last_t = 0.0, time.perf_counter()
+        fps = 0.0
+        off_plane = OffPlaneWatch(synthetic=not using_calibrated)
+        seq = 0
+        ball_dropouts = 0
 
         # Whole-frame undistortion: the tag detector searches the entire
         # image, so it (and the overlay drawn on top of it) need to share one
@@ -530,142 +740,195 @@ def main() -> None:
         if http_server is not None:
             print(f"serving live state at http://localhost:{args.serve_http}/state "
                   f"(or http://{lan_ip()}:{args.serve_http}/state from another machine)")
-        print("window open -- q or Esc to quit\n")
+        zmq_pub = ZmqStatePublisher(args.zmq_pub) if args.zmq_pub else None
+        if zmq_pub is not None:
+            print(f"publishing live state on ZMQ PUB {args.zmq_pub} every frame")
+        publishing = any(p is not None for p in (json_out, http_server, json_log_file, zmq_pub))
 
         win = "combined tracking"
-        cv2.namedWindow(win, cv2.WINDOW_AUTOSIZE)
+        if headless:
+            print("running headless -- Ctrl+C to quit\n")
+        else:
+            print("window open -- q or Esc to quit\n")
+            cv2.namedWindow(win, cv2.WINDOW_AUTOSIZE)
 
-        while True:
-            ok, frame = cap.read()
-            if not ok:
-                print("camera stopped returning frames")
-                break
-            now = time.perf_counter()
-            dt = now - last_t
-            last_t = now
-            fps = 0.9 * fps + 0.1 / max(dt, 1e-6)
+        # From here on only the grabber's thread reads the camera.
+        grabber = LatestFrameGrabber(cap)
+        last_t = time.perf_counter()
+        try:
+            while True:
+                got = grabber.read()
+                if got is None:
+                    print("camera stopped returning frames")
+                    break
+                frame, t_capture, t_perf = got
+                # dt between *captures*, not between loop iterations: when the
+                # grabber drops a frame, the filters are told the real gap.
+                dt = t_perf - last_t
+                last_t = t_perf
+                fps = 0.9 * fps + 0.1 / max(dt, 1e-6)
 
-            if undistort_maps is not None:
-                frame = cv2.remap(frame, *undistort_maps, cv2.INTER_LINEAR)
-            grey = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                if undistort_maps is not None:
+                    frame = cv2.remap(frame, *undistort_maps, cv2.INTER_LINEAR)
 
-            cam_params = (K[0, 0], K[1, 1], K[0, 2], K[1, 2])
-            with suppressed_stderr():
-                dets = tag_detector.detect(grey, estimate_tag_pose=True,
-                                           camera_params=cam_params, tag_size=args.tag_size)
-            tag_poses = [
-                tag_field_pose(d, transform, field, args.heading_offset) for d in dets
-            ]
-            tag_states = tag_tracker.update(tag_poses, dt)
+                t0 = time.perf_counter()
+                grey = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                cam_params = (K[0, 0], K[1, 1], K[0, 2], K[1, 2])
+                with suppressed_stderr():
+                    dets = tag_detector.detect(grey, estimate_tag_pose=True,
+                                               camera_params=cam_params,
+                                               tag_size=args.tag_size)
+                tag_poses = [
+                    tag_field_pose(d, transform, field, args.heading_offset) for d in dets
+                ]
+                tag_states = tag_tracker.update(tag_poses, dt)
+                t1 = time.perf_counter()
+                ball_state = ball_tracker.update(frame, dt)
+                t2 = time.perf_counter()
 
-            ball_state = ball_tracker.update(frame, dt)
-            if ball_state is not None and ball_state.visible:
-                ball_trail.append((ball_state.x, ball_state.y))
-
-            draw_field(frame, field, transform, K, show_grid)
-            for d, pose in zip(dets, tag_poses):
-                draw_tag_marks(frame, d, pose, color_for(pose.tag_id))
-            for s in tag_states:
-                if s.visible:
-                    tag_trails[s.tag_id].append((s.x, s.y))
-            draw_ball_marks(frame, ball_tracker, ball_state, show_mask)
-            draw_combined_readout(frame, tag_states, ball_state, field, transform, K,
-                                  args.tag_size, color.name, color.radius_m, intr_source, fps)
-
-            # Same fields each skill's own --print-* emits, prefixed with which
-            # kind of row it is. Dropping grounded/visible would leave a reader
-            # unable to tell a coasting or airborne estimate from a measured
-            # one, which is the one thing it most needs to know.
-            if args.print_poses:
+                off_plane.add(tag_poses)
+                if ball_state is not None:
+                    if ball_state.visible:
+                        ball_trail.append((ball_state.x, ball_state.y))
+                    else:
+                        ball_dropouts += 1
                 for s in tag_states:
-                    print(f"tag\t{s.tag_id}\t{s.x:.4f}\t{s.y:.4f}\t{s.theta_deg:.2f}\t"
-                          f"{s.vx:+.3f}\t{s.vy:+.3f}\t{s.speed:.3f}\t{int(s.visible)}",
+                    if s.visible:
+                        tag_trails[s.tag_id].append((s.x, s.y))
+
+                # Same fields each skill's own --print-* emits, prefixed with
+                # which kind of row it is. Dropping grounded/visible would leave
+                # a reader unable to tell a coasting or airborne estimate from a
+                # measured one, which is the one thing it most needs to know.
+                if args.print_poses:
+                    for s in tag_states:
+                        print(f"tag\t{s.tag_id}\t{s.x:.4f}\t{s.y:.4f}\t{s.theta_deg:.2f}\t"
+                              f"{s.vx:+.3f}\t{s.vy:+.3f}\t{s.speed:.3f}\t{int(s.visible)}",
+                              flush=True)
+                if args.print_states and ball_state is not None:
+                    print(f"ball\t{ball_state.x:.4f}\t{ball_state.y:.4f}\t"
+                          f"{ball_state.z:.4f}\t"
+                          f"{ball_state.vx:+.4f}\t{ball_state.vy:+.4f}\t"
+                          f"{int(ball_state.grounded)}\t{int(ball_state.visible)}",
                           flush=True)
-            if args.print_states and ball_state is not None:
-                print(f"ball\t{ball_state.x:.4f}\t{ball_state.y:.4f}\t{ball_state.z:.4f}\t"
-                      f"{ball_state.vx:+.4f}\t{ball_state.vy:+.4f}\t"
-                      f"{int(ball_state.grounded)}\t{int(ball_state.visible)}",
-                      flush=True)
-            if json_out is not None or http_server is not None or json_log_file is not None:
-                doc = build_state_doc(field, tag_states, ball_state)
-                if json_out is not None:
-                    write_json_state(json_out, doc)
-                if http_server is not None:
-                    http_server.publish(doc)
-                if json_log_file is not None:
-                    # Flushed every line, not just buffered: a reader tailing
-                    # the file (tail -f, or its own poll loop) sees each
-                    # frame as soon as it lands, not whenever the OS decides
-                    # to flush a full buffer.
-                    json_log_file.write(json.dumps(doc) + "\n")
-                    json_log_file.flush()
+                if publishing:
+                    stats = {
+                        "fps": fps,
+                        "tag_ms": (t1 - t0) * 1000.0,
+                        "ball_ms": (t2 - t1) * 1000.0,
+                        "capture_dropped": grabber.dropped,
+                        "ball_dropouts": ball_dropouts,
+                    }
+                    doc = build_state_doc(field, tag_states, ball_state, seq=seq,
+                                          t_capture=t_capture,
+                                          tag_max_coast_s=tag_tracker.max_coast_s,
+                                          stats=stats)
+                    if json_out is not None:
+                        write_json_state(json_out, doc)
+                    if http_server is not None:
+                        http_server.publish(doc)
+                    if zmq_pub is not None:
+                        zmq_pub.publish(doc)
+                    if json_log_file is not None:
+                        # Flushed every line, not just buffered: a reader
+                        # tailing the file (tail -f, or its own poll loop) sees
+                        # each frame as soon as it lands, not whenever the OS
+                        # decides to flush a full buffer.
+                        json_log_file.write(json.dumps(doc) + "\n")
+                        json_log_file.flush()
+                seq += 1
 
-            panel = draw_combined_plan(plan, tag_states, tag_trails, ball_state,
-                                       ball_trail, transform, show_trails)
-            composite = np.hstack([frame, panel])
-            if composite.shape[1] != args.display_width:
-                k = args.display_width / composite.shape[1]
-                # INTER_AREA is the right filter for shrinking and a poor one
-                # for enlarging, where it degenerates to nearest-neighbour.
-                composite = cv2.resize(
-                    composite, None, fx=k, fy=k,
-                    interpolation=cv2.INTER_AREA if k < 1.0 else cv2.INTER_LINEAR)
-            cv2.imshow(win, composite)
+                # Drawing only after publishing: none of it feeds the doc, and
+                # every millisecond spent on overlays first is latency_ms.
+                if headless:
+                    continue
+                draw_field(frame, field, transform, K, show_grid)
+                for d, pose in zip(dets, tag_poses):
+                    draw_tag_marks(frame, d, pose, color_for(pose.tag_id))
+                draw_ball_marks(frame, ball_tracker, ball_state, show_mask)
+                draw_combined_readout(frame, tag_states, ball_state, field, transform, K,
+                                      args.tag_size, color.name, color.radius_m,
+                                      intr_source, fps)
+                panel = draw_combined_plan(plan, tag_states, tag_trails, ball_state,
+                                           ball_trail, transform, show_trails)
+                composite = np.hstack([frame, panel])
+                if composite.shape[1] != args.display_width:
+                    k = args.display_width / composite.shape[1]
+                    # INTER_AREA is the right filter for shrinking and a poor
+                    # one for enlarging, where it degenerates to
+                    # nearest-neighbour.
+                    composite = cv2.resize(
+                        composite, None, fx=k, fy=k,
+                        interpolation=cv2.INTER_AREA if k < 1.0 else cv2.INTER_LINEAR)
+                cv2.imshow(win, composite)
 
-            key = read_key()
-            if key in (ord("q"), 27):
-                break
-            elif key == ord("g"):
-                show_grid = not show_grid
-            elif key == ord("t"):
-                show_trails = not show_trails
-            elif key == ord("m"):
-                show_mask = not show_mask
-            elif key == ord("r"):
-                tag_trails.clear()
-                ball_trail.clear()
-                tag_tracker.reset()
-                # BallTracker has no reset() -- rebuilding it is the reset.
-                # Leaving this out makes `r` clear the tag tracks while
-                # silently keeping the ball track, which may be exactly the
-                # thing you pressed `r` to get rid of.
-                ball_tracker = _new_ball_tracker(args, color, transform, K)
-            elif key in (ord("["), ord("]")):
-                K = K.copy()
-                K[0, 0] *= 0.98 if key == ord("[") else 1.02
-                K[1, 1] = K[0, 0]
-                intr_source = "hand-tuned"
-                undistort_maps = intr.undistort_maps(K, dist, w, h)
-                ball_tracker = _new_ball_tracker(args, color, transform, K)
-                print(f"fx {K[0, 0]:.1f}  -> {intr.hfov_of(K, w):.1f} deg HFOV")
-            elif key == ord("w"):
-                if using_calibrated:
-                    print(f"field is calibrated ({transform.source}); "
-                          "pass --synthetic-field to demo the made-up field instead")
-                else:
-                    mode = "floor" if mode == "wall" else "wall"
-                    transform = build_transform(args, field, mode)
-                    plan = PlanView(field, height=h, mode=mode)
+                key = read_key()
+                if key in (ord("q"), 27):
+                    break
+                elif key == ord("g"):
+                    show_grid = not show_grid
+                elif key == ord("t"):
+                    show_trails = not show_trails
+                elif key == ord("m"):
+                    show_mask = not show_mask
+                elif key == ord("r"):
                     tag_trails.clear()
                     ball_trail.clear()
                     tag_tracker.reset()
+                    # BallTracker has no reset() -- rebuilding it is the reset.
+                    # Leaving this out makes `r` clear the tag tracks while
+                    # silently keeping the ball track, which may be exactly the
+                    # thing you pressed `r` to get rid of.
                     ball_tracker = _new_ball_tracker(args, color, transform, K)
-                    print(f"transform: {transform.source}")
-            elif key == ord("s"):
-                path = intr.save(K, w, h, intr_source, dist=dist)
-                print(f"saved {path}")
-                if not np.any(dist):
-                    print("(fx only, no lens distortion -- run calibrate-camera for that)")
+                elif key in (ord("["), ord("]")):
+                    K = K.copy()
+                    K[0, 0] *= 0.98 if key == ord("[") else 1.02
+                    K[1, 1] = K[0, 0]
+                    intr_source = "hand-tuned"
+                    undistort_maps = intr.undistort_maps(K, dist, w, h)
+                    ball_tracker = _new_ball_tracker(args, color, transform, K)
+                    print(f"fx {K[0, 0]:.1f}  -> {intr.hfov_of(K, w):.1f} deg HFOV")
+                elif key == ord("w"):
+                    if using_calibrated:
+                        print(f"field is calibrated ({transform.source}); "
+                              "pass --synthetic-field to demo the made-up field instead")
+                    else:
+                        mode = "floor" if mode == "wall" else "wall"
+                        transform = build_transform(args, field, mode)
+                        plan = PlanView(field, height=h, mode=mode)
+                        tag_trails.clear()
+                        ball_trail.clear()
+                        tag_tracker.reset()
+                        ball_tracker = _new_ball_tracker(args, color, transform, K)
+                        off_plane = OffPlaneWatch(synthetic=True)
+                        print(f"transform: {transform.source}")
+                elif key == ord("s"):
+                    path = intr.save(K, w, h, intr_source, dist=dist)
+                    print(f"saved {path}")
+                    if not np.any(dist):
+                        print("(fx only, no lens distortion -- run calibrate-camera for that)")
+        except KeyboardInterrupt:
+            # The only way out with --no-window, and fine with a window too.
+            print("\ninterrupted -- shutting down")
 
     finally:
+        # The grabber first: its thread is still reading the camera, and
+        # VideoCapture is not safe to unlock or release from under it.
+        if grabber is not None:
+            grabber.stop()
+            print(f"capture thread dropped {grabber.dropped} frame(s) the tracker "
+                  "was too busy to take")
         if http_server is not None:
             http_server.stop()
+        if zmq_pub is not None:
+            zmq_pub.stop()
         if json_log_file is not None:
             json_log_file.close()
         if locked:
             print("camera unlock: " + ", ".join(unlock_camera(cap)))
         cap.release()
-        cv2.destroyAllWindows()
+        if not headless:
+            cv2.destroyAllWindows()
 
 
 if __name__ == "__main__":
