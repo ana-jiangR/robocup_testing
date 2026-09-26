@@ -22,7 +22,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 from vision_core import intrinsics as intr
-from vision_core.camera import list_cameras, lock_camera, unlock_camera, open_camera, read_key
+from vision_core.camera import list_cameras, lock_camera, unlock_camera, open_camera, read_frame, read_key
 from vision_core.field import (
     CameraFieldTransform,
     Field,
@@ -313,7 +313,7 @@ def main() -> None:
         locked = True
 
     try:
-        ok, frame = cap.read()
+        ok, frame = read_frame(cap)
         if not ok:
             raise SystemExit("camera opened but the first frame failed")
         h, w = frame.shape[:2]
@@ -346,7 +346,7 @@ def main() -> None:
 
         while True:
             if not paused:
-                ok, frame = cap.read()
+                ok, frame = read_frame(cap)
                 # Sample the clock right after the grab, and hand the filter the dt
                 # it actually got. A filter fed a nominal 1/30 while the camera
                 # delivers a jittery 24 mis-scales every velocity it reports, and the

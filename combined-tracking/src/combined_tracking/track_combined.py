@@ -46,7 +46,7 @@ from tag_tracking.pose import tag_field_pose
 from tag_tracking.track import GHOST_COLOR as TAG_GHOST_COLOR
 from tag_tracking.track import VELOCITY_COLOR, draw_tag_marks, suppressed_stderr
 from vision_core import intrinsics as intr
-from vision_core.camera import list_cameras, lock_camera, open_camera, read_key, unlock_camera
+from vision_core.camera import list_cameras, lock_camera, open_camera, read_frame, read_key, unlock_camera
 from vision_core.field import (
     CameraFieldTransform,
     Field,
@@ -503,7 +503,7 @@ def main() -> None:
         locked = True
 
     try:
-        ok, frame = cap.read()
+        ok, frame = read_frame(cap)
         if not ok:
             raise SystemExit("camera opened but the first frame failed")
         h, w = frame.shape[:2]
@@ -555,7 +555,7 @@ def main() -> None:
         cv2.namedWindow(win, cv2.WINDOW_AUTOSIZE)
 
         while True:
-            ok, frame = cap.read()
+            ok, frame = read_frame(cap)
             if not ok:
                 print("camera stopped returning frames")
                 break

@@ -38,7 +38,7 @@ import cv2
 import numpy as np
 import pupil_apriltags as pa
 from vision_core import intrinsics as intr
-from vision_core.camera import list_cameras, open_camera, read_key
+from vision_core.camera import list_cameras, open_camera, read_frame, read_key
 from vision_core.field import (
     CameraFieldTransform,
     Field,
@@ -323,7 +323,7 @@ def main() -> None:
                   "(the field pose is already solved live, from simulated tags)\n")
     else:
         cap = open_camera(args.camera, args.width, args.height)
-        ok, frame = cap.read()
+        ok, frame = read_frame(cap)
         if not ok:
             raise SystemExit("camera opened but the first frame failed")
         h, w = frame.shape[:2]
@@ -338,7 +338,7 @@ def main() -> None:
             layout = default_field_layout(field)
 
             def _read_bgr() -> np.ndarray:
-                ok2, frm = cap.read()
+                ok2, frm = read_frame(cap)
                 if not ok2:
                     raise RuntimeError("camera stopped returning frames")
                 return frm
@@ -354,7 +354,7 @@ def main() -> None:
                     _read_bgr, layout, args.frames_per_corner,
                     window_name="calibrate-field (one tag, live)",
                 )
-                result = solve_sequential(averaged, layout, K, dist)
+                result = solve_sequential(averaged, layout, K, dist, tag_size=args.tag_size)
                 print(f"\n{result.transform.source}")
                 print(f"reprojection error: {result.reproj_error_px:.3f} px rms, "
                       f"{result.max_reproj_error_px:.3f} px max")
@@ -419,7 +419,7 @@ def main() -> None:
         if sim_cam is not None:
             frame = cv2.cvtColor(sim_cam.read(), cv2.COLOR_GRAY2BGR)
         else:
-            ok, frame = cap.read()
+            ok, frame = read_frame(cap)
             if not ok:
                 print("camera stopped returning frames")
                 break

@@ -31,7 +31,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-from vision_core.camera import list_cameras, lock_camera, unlock_camera, open_camera, read_key
+from vision_core.camera import list_cameras, lock_camera, unlock_camera, open_camera, read_frame, read_key
 from vision_core.paths import calib_path
 
 #: Shared across skills -- it describes the camera's view of a ball, and lives
@@ -517,7 +517,7 @@ def main() -> None:
                 print(f"sample rejected: {e}")
 
         while True:
-            ok, frame = cap.read()
+            ok, frame = read_frame(cap)
             if not ok:
                 print("camera stopped returning frames")
                 break

@@ -38,7 +38,7 @@ from typing import Callable, Iterable
 import cv2
 import numpy as np
 import pupil_apriltags as pa
-from vision_core.camera import open_camera, read_key
+from vision_core.camera import open_camera, read_frame, read_key
 from vision_core.field import (
     Field,
     ReferenceTagFieldTransform,
@@ -51,6 +51,12 @@ from .pose import tag_field_pose
 MIN_FRAMES = 10
 MAX_LIVE_FRAMES = 40
 FRAMES_PER_CORNER = 15
+#: --sequential: a new sample this far (px) from the running mean means the tag
+#: is being moved, not held, so the corner's samples restart.
+STILL_PX = 3.0
+#: --sequential: a tag this close (px) to an already-confirmed corner is still
+#: sitting where the last corner was captured, not at the next one yet.
+MIN_CORNER_SEP_PX = 40.0
 
 
 def default_field_layout(field: Field) -> dict[int, tuple[float, float]]:
@@ -214,16 +220,17 @@ def capture_reference_frames(
 
 class _AveragedDetection:
     """A fake pupil_apriltags detection standing in for one corner's averaged
-    pixel centre, so the averaged result can be solved through the exact same
-    ReferenceTagFieldTransform.from_detections() the simultaneous path uses,
-    instead of duplicating the solvePnP call-site.
+    pixel centre and corners, so the averaged result can be solved through the
+    exact same ReferenceTagFieldTransform.from_detections() the simultaneous
+    path uses, instead of duplicating the solvePnP call-site.
     """
 
-    __slots__ = ("tag_id", "center")
+    __slots__ = ("tag_id", "center", "corners")
 
-    def __init__(self, tag_id: int, center: tuple[float, float]) -> None:
+    def __init__(self, tag_id: int, center, corners) -> None:
         self.tag_id = tag_id
-        self.center = center
+        self.center = np.asarray(center, np.float64).reshape(2)
+        self.corners = np.asarray(corners, np.float64).reshape(4, 2)
 
 
 @dataclass
@@ -235,10 +242,11 @@ class SequentialCalibrationResult:
 
 
 def solve_sequential(
-    averaged: dict[int, np.ndarray],
+    averaged: dict[int, _AveragedDetection],
     layout: dict[int, tuple[float, float]],
     K: np.ndarray,
     dist: np.ndarray | None = None,
+    tag_size: float | None = None,
 ) -> SequentialCalibrationResult:
     """Solve one field pose from one averaged pixel position per corner,
     instead of several tags seen at once -- the counterpart to
@@ -248,13 +256,20 @@ def solve_sequential(
     signal is different too: reprojection error (px) -- project each known
     field corner through the solved pose and compare to where it was actually
     seen, the same idea calibrate-camera's rms_reproj_px uses for the lens.
+
+    Pass `tag_size` (the tag lying flat at each corner) to solve on all 16 tag
+    corners rather than the 4 centres. Four points is the ambiguous worst case
+    for planar PnP, and fits them near-exactly whatever the pose, so without it
+    the reprojection error below says little.
     """
-    fake_dets = [_AveragedDetection(tid, tuple(px)) for tid, px in averaged.items()]
-    transform = ReferenceTagFieldTransform.from_detections(fake_dets, layout, K, dist)
+    fake_dets = [
+        _AveragedDetection(tid, det.center, det.corners) for tid, det in averaged.items()
+    ]
+    transform = ReferenceTagFieldTransform.from_detections(fake_dets, layout, K, dist, tag_size)
     transform.source = f"measured, one tag moved to {len(averaged)} corners in turn"
 
     obj = np.array([[*layout[tid], 0.0] for tid in averaged], np.float64)
-    img = np.array([averaged[tid] for tid in averaged], np.float64)
+    img = np.array([averaged[tid].center for tid in averaged], np.float64)
     rvec, tvec = transform.rvec_tvec()
     dist_c = dist if dist is not None else np.zeros(5, np.float64)
     proj, _ = cv2.projectPoints(obj, rvec, tvec, K, dist_c)
@@ -280,22 +295,27 @@ def capture_sequential_corners(
 
     At each position: accumulates every frame with *exactly one* tag visible
     (zero or several are ambiguous, so skipped) up to `frames_per_corner`,
-    averaging their pixel centres to smooth out per-frame jitter. 'q' confirms
+    averaging their pixel centres and corners to smooth out per-frame jitter.
+    Only a tag held still counts: one that moves more than STILL_PX restarts
+    the samples, and one still within MIN_CORNER_SEP_PX of a corner already
+    confirmed is ignored -- otherwise the next corner fills up in half a
+    second from wherever the tag was while being carried there. 'q' confirms
     the current corner and moves to the next once enough samples are in;
     'r' clears the current corner's samples to retry it; Esc aborts entirely.
 
-    Returns {tag_id: averaged pixel centre}, keyed the same way `layout` is --
+    Returns {tag_id: averaged detection}, keyed the same way `layout` is --
     the physical tag's id at capture time does not have to match; only the
     order you visit `layout`'s positions in does.
     """
     detector = pa.Detector(families="tag36h11", nthreads=2, quad_decimate=1.0)
     win = window_name
     cv2.namedWindow(win, cv2.WINDOW_AUTOSIZE)
-    results: dict[int, np.ndarray] = {}
+    results: dict[int, _AveragedDetection] = {}
     items = list(layout.items())
     try:
         for i, (label_id, (fx, fy)) in enumerate(items):
             samples: list[np.ndarray] = []
+            corner_samples: list[np.ndarray] = []
             while True:
                 bgr = read_bgr()
                 grey = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
@@ -305,8 +325,20 @@ def capture_sequential_corners(
                     cv2.polylines(disp, [np.asarray(d.corners, np.int32)], True,
                                   (0, 165, 255), 2)
                 good = len(dets) == 1
+                hint = None
+                if good:
+                    c = np.asarray(dets[0].center, np.float64)
+                    if any(np.linalg.norm(c - r.center) < MIN_CORNER_SEP_PX
+                           for r in results.values()):
+                        good = False
+                        hint = "still at the previous corner -- move the tag"
+                    elif samples and np.linalg.norm(c - np.mean(samples, axis=0)) > STILL_PX:
+                        samples.clear()
+                        corner_samples.clear()
+                        hint = "tag moving -- set it down and let go"
                 if good and len(samples) < frames_per_corner:
-                    samples.append(np.asarray(dets[0].center, np.float64))
+                    samples.append(c)
+                    corner_samples.append(np.asarray(dets[0].corners, np.float64))
                 ready = len(samples) >= frames_per_corner
                 status_colour = (
                     (0, 255, 0) if ready else (0, 165, 255) if good else (0, 0, 255)
@@ -318,7 +350,9 @@ def capture_sequential_corners(
                     f"({fx:g}, {fy:g})   captured {len(samples)}/{frames_per_corner}",
                     (10, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.6, status_colour, 2, cv2.LINE_AA,
                 )
-                if dets and not good:
+                if hint is not None:
+                    msg = hint
+                elif len(dets) > 1:
                     msg = f"{len(dets)} tags visible -- show exactly one"
                 elif not good:
                     msg = "no tag visible"
@@ -336,11 +370,14 @@ def capture_sequential_corners(
                     raise SystemExit(0)
                 if key == ord("r"):
                     samples.clear()
+                    corner_samples.clear()
                 if key == ord("q") and ready:
                     break
             avg = np.mean(samples, axis=0)
             px_std = float(np.std(np.linalg.norm(np.array(samples) - avg, axis=1)))
-            results[label_id] = avg
+            results[label_id] = _AveragedDetection(
+                label_id, avg, np.mean(corner_samples, axis=0)
+            )
             print(
                 f"  corner {i + 1}/{len(items)} at ({fx:g}, {fy:g}): "
                 f"averaged {len(samples)} samples, pixel ({avg[0]:.1f}, {avg[1]:.1f}), "
@@ -406,7 +443,7 @@ def _run_live(args, field: Field, layout: dict[int, tuple[float, float]]):
     cap = open_camera(args.camera, args.width, args.height)
 
     def _read_bgr() -> np.ndarray:
-        ok, frm = cap.read()
+        ok, frm = read_frame(cap)
         if not ok:
             raise RuntimeError("camera stopped returning frames")
         return frm
@@ -441,23 +478,25 @@ def _run_synthetic_sequential(args, field: Field, layout: dict[int, tuple[float,
     print("simulating one tag carried to each corner in turn...\n")
 
     detector = pa.Detector(families="tag36h11", nthreads=2, quad_decimate=1.0)
-    averaged: dict[int, np.ndarray] = {}
+    averaged: dict[int, _AveragedDetection] = {}
     for tag_id, (cx, cy) in layout.items():
         cam = SyntheticFieldCamera(
             {}, truth, tag_size=args.tag_size, shape=shape, K=K,
             extra_tags=((tag_id, cx, cy, 0.0),),
         )
         samples: list[np.ndarray] = []
+        corner_samples: list[np.ndarray] = []
         while len(samples) < args.frames_per_corner:
             dets = detector.detect(cam.read())
             if len(dets) == 1:
                 samples.append(np.asarray(dets[0].center, np.float64))
+                corner_samples.append(np.asarray(dets[0].corners, np.float64))
         avg = np.mean(samples, axis=0)
-        averaged[tag_id] = avg
+        averaged[tag_id] = _AveragedDetection(tag_id, avg, np.mean(corner_samples, axis=0))
         print(f"  corner id {tag_id} at ({cx:g}, {cy:g}): "
               f"averaged {len(samples)} synthetic samples, pixel ({avg[0]:.1f}, {avg[1]:.1f})")
 
-    result = solve_sequential(averaged, layout, K)
+    result = solve_sequential(averaged, layout, K, tag_size=args.tag_size)
     print(f"\n{result.transform.source}")
     print(f"reprojection error: {result.reproj_error_px:.3f} px rms, "
           f"{result.max_reproj_error_px:.3f} px max")
@@ -479,7 +518,7 @@ def _run_live_sequential(args, field: Field, layout: dict[int, tuple[float, floa
     cap = open_camera(args.camera, args.width, args.height)
 
     def _read_bgr() -> np.ndarray:
-        ok, frm = cap.read()
+        ok, frm = read_frame(cap)
         if not ok:
             raise RuntimeError("camera stopped returning frames")
         return frm
@@ -492,7 +531,7 @@ def _run_live_sequential(args, field: Field, layout: dict[int, tuple[float, floa
         cap.release()
         cv2.destroyAllWindows()
 
-    result = solve_sequential(averaged, layout, K, dist)
+    result = solve_sequential(averaged, layout, K, dist, tag_size=args.tag_size)
     print(f"\n{result.transform.source}")
     print(f"reprojection error: {result.reproj_error_px:.3f} px rms, "
           f"{result.max_reproj_error_px:.3f} px max")
