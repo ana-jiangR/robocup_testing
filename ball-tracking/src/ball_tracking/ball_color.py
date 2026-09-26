@@ -44,6 +44,18 @@ COLOR_FILE = "ball_color.json"
 H_BINS, S_BINS = 30, 32
 H_RANGE, S_RANGE = 180, 256
 
+#: How far the stored histogram reaches beyond the pixels it was measured from,
+#: in bins, before back-projection. A profile measured under one lamp meets the
+#: same ball under another: shade and a bluish ambient both pull saturation
+#: down, a warmer bulb pushes it up, and a re-balanced camera nudges the hue.
+#: The measured histogram is a tight island in H/S, so a few bins of drift lands
+#: the ball on zero likelihood and it vanishes -- the very cliff back-projection
+#: was chosen to avoid. Spreading it along S (widely: 4 bins is 32 levels) and
+#: along H (a little: 1 bin is 6 degrees) lets the ball fade instead. Both are
+#: per profile and tunable from calibrate-ball.
+H_SPREAD_BINS = 1.0
+S_SPREAD_BINS = 4.0
+
 WIN = "ball color calibration"
 
 
@@ -73,15 +85,45 @@ class BallColor:
     v_max: int = 255
     #: Back-projection likelihood above which a pixel counts as ball, 0..255.
     threshold: int = 40
+    #: Reach beyond the measured histogram, in bins -- see H_SPREAD_BINS.
+    h_spread: float = H_SPREAD_BINS
+    s_spread: float = S_SPREAD_BINS
     created: str = ""
 
     # -- masking -----------------------------------------------------------
+
+    def working_hist(self) -> np.ndarray:
+        """The histogram back-projection actually runs against: the measured
+        one, spread by (h_spread, s_spread) bins and re-normalised to 255 so
+        `threshold` keeps meaning the same thing.
+
+        The measured histogram is what gets saved; the spread is applied on use,
+        so a profile can be re-tuned without re-sampling the ball, and an old
+        profile picks up the default spread the moment it is loaded.
+        """
+        hist = np.asarray(self.hist, np.float32)
+        if self.h_spread <= 0.0 and self.s_spread <= 0.0:
+            return np.ascontiguousarray(hist)
+        # Hue wraps -- red sits at both ends of the axis -- so pad the H axis
+        # with itself rather than letting the blur clamp at the border.
+        pad = int(np.ceil(3.0 * max(self.h_spread, 0.0))) + 1
+        padded = np.concatenate([hist[-pad:], hist, hist[:pad]], axis=0)
+        # Rows are H, columns are S: sigmaY spreads hue, sigmaX saturation.
+        blurred = cv2.GaussianBlur(
+            padded, (0, 0),
+            sigmaX=max(self.s_spread, 1e-3), sigmaY=max(self.h_spread, 1e-3),
+            borderType=cv2.BORDER_REPLICATE,
+        )
+        out = np.ascontiguousarray(blurred[pad:pad + H_BINS])
+        if out.max() > 0.0:
+            cv2.normalize(out, out, 0, 255, cv2.NORM_MINMAX)
+        return out
 
     def mask(self, frame_bgr: np.ndarray) -> np.ndarray:
         """A uint8 0/255 mask of where this ball probably is."""
         hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
         prob = cv2.calcBackProject(
-            [hsv], [0, 1], self.hist, [0, H_RANGE, 0, S_RANGE], scale=1.0
+            [hsv], [0, 1], self.working_hist(), [0, H_RANGE, 0, S_RANGE], scale=1.0
         )
         gate = cv2.inRange(
             hsv,
@@ -99,7 +141,7 @@ class BallColor:
         """The raw 0..255 back-projection, for the preview."""
         hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
         return cv2.calcBackProject(
-            [hsv], [0, 1], self.hist, [0, H_RANGE, 0, S_RANGE], scale=1.0
+            [hsv], [0, 1], self.working_hist(), [0, H_RANGE, 0, S_RANGE], scale=1.0
         )
 
     def hue_peak(self) -> int:
@@ -123,6 +165,8 @@ class BallColor:
             "v_min": int(self.v_min),
             "v_max": int(self.v_max),
             "threshold": int(self.threshold),
+            "h_spread": float(self.h_spread),
+            "s_spread": float(self.s_spread),
             "created": self.created or date.today().isoformat(),
         }
 
@@ -143,6 +187,8 @@ class BallColor:
             v_min=int(d.get("v_min", 40)),
             v_max=int(d.get("v_max", 255)),
             threshold=int(d.get("threshold", 40)),
+            h_spread=float(d.get("h_spread", H_SPREAD_BINS)),
+            s_spread=float(d.get("s_spread", S_SPREAD_BINS)),
             created=d.get("created", ""),
         )
 
@@ -310,6 +356,18 @@ class _Sampler:
         return x0, y0, x1, y1
 
 
+def _clip_box(
+    box: tuple[int, int, int, int], shape: tuple[int, ...]
+) -> tuple[int, int, int, int]:
+    """Clamp a drag box to the video frame's bounds."""
+    h, w = shape[:2]
+    x0, y0, x1, y1 = box
+    return (
+        max(0, min(x0, w)), max(0, min(y0, h)),
+        max(0, min(x1, w)), max(0, min(y1, h)),
+    )
+
+
 def _overlay(frame: np.ndarray, profile: BallColor, sampler: _Sampler,
              have_sample: bool) -> np.ndarray:
     """Video on the left, live mask on the right."""
@@ -339,7 +397,8 @@ def _overlay(frame: np.ndarray, profile: BallColor, sampler: _Sampler,
                 cv2.LINE_AA)
     head = (
         f"profile '{profile.name}'  r={profile.radius_m * 1000:.0f}mm  "
-        f"thresh {profile.threshold}  s_min {profile.s_min}"
+        f"thresh {profile.threshold}  s_min {profile.s_min}  "
+        f"spread H{profile.h_spread:g} S{profile.s_spread:g}"
         + (f"  H~{profile.hue_peak()}" if have_sample else "")
     )
     cv2.rectangle(shown, (0, 0), (shown.shape[1], 34), (0, 0, 0), -1)
@@ -354,7 +413,8 @@ def main() -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Keys: drag = sample the ball, h = scene hue histogram, "
-            "- / + = threshold, [ / ] = s_min, a = add to sample, s = save, q = quit"
+            "- / + = threshold, [ / ] = s_min, < / > = S spread, ; / ' = H spread, "
+            "a = add to sample, s = save, q = quit"
         ),
     )
     ap.add_argument("--profile", default="test",
@@ -367,6 +427,14 @@ def main() -> None:
                     help="saturation floor, 0-255 (default 80)")
     ap.add_argument("--threshold", type=int, default=40,
                     help="back-projection cut, 0-255 (default 40)")
+    ap.add_argument("--h-spread", type=float, default=H_SPREAD_BINS,
+                    help="how far the profile reaches beyond the sampled hues, in "
+                         f"bins of {H_RANGE / H_BINS:g} degrees (default {H_SPREAD_BINS:g})")
+    ap.add_argument("--s-spread", type=float, default=S_SPREAD_BINS,
+                    help="how far it reaches along saturation, in bins of "
+                         f"{S_RANGE / S_BINS:g} levels (default {S_SPREAD_BINS:g}). Raise "
+                         "it if the ball drops out of the mask when it rolls into "
+                         "shade or under a different lamp")
     ap.add_argument("--camera", type=int, default=0)
     ap.add_argument("--width", type=int, default=1280)
     ap.add_argument("--height", type=int, default=720)
@@ -391,6 +459,7 @@ def main() -> None:
         for name, p in sorted(profiles.items()):
             print(f"  {name:10s} r={p.radius_m * 1000:.0f}mm  H~{p.hue_peak():3d}  "
                   f"thresh {p.threshold:3d}  s_min {p.s_min:3d}  "
+                  f"spread H{p.h_spread:g} S{p.s_spread:g}  "
                   f"{p.created}  {p.note}")
         return
 
@@ -411,6 +480,8 @@ def main() -> None:
             note=args.note,
             s_min=args.s_min,
             threshold=args.threshold,
+            h_spread=args.h_spread,
+            s_spread=args.s_spread,
         )
         sampler = _Sampler()
         have_sample = False
@@ -426,9 +497,12 @@ def main() -> None:
         print("  h                          print a hue histogram of the scene")
         print("  - / +                      back-projection threshold down / up")
         print("  [ / ]                      saturation floor down / up")
+        print("  < / >                      saturation spread down / up")
+        print("  ; / '                      hue spread down / up")
         print("  s                          save     q / Esc  quit\n")
         print("Aim for a mask that covers the ball and almost nothing else.")
-        print("Then roll the ball into shadow and check it survives.\n")
+        print("Then roll the ball into shadow and under other lights and check it")
+        print("survives; if it drops out, widen the spread with '>' before saving.\n")
 
         def resample() -> None:
             nonlocal have_sample
@@ -450,6 +524,10 @@ def main() -> None:
 
             box = sampler.region()
             if box and not sampler.dragging:
+                # The window is video | mask, so a drag that strays onto the
+                # right half must be clipped to the video, not silently
+                # sample nothing.
+                box = _clip_box(box, frame.shape)
                 hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
                 patch = hsv[box[1]:box[3], box[0]:box[2]].reshape(-1, 3)
                 samples = [patch]  # a fresh drag replaces; 'a' accumulates
@@ -480,9 +558,22 @@ def main() -> None:
                 profile.s_min = min(254, profile.s_min + 5)
                 resample()
                 print(f"s_min {profile.s_min}")
+            elif key in (ord(","), ord("<")):
+                profile.s_spread = max(0.0, profile.s_spread - 1.0)
+                print(f"s_spread {profile.s_spread:g} bins")
+            elif key in (ord("."), ord(">")):
+                profile.s_spread = min(float(S_BINS), profile.s_spread + 1.0)
+                print(f"s_spread {profile.s_spread:g} bins")
+            elif key in (ord(";"), ord(":")):
+                profile.h_spread = max(0.0, profile.h_spread - 0.5)
+                print(f"h_spread {profile.h_spread:g} bins ({profile.h_spread * H_RANGE / H_BINS:g} deg)")
+            elif key in (ord("'"), ord('"')):
+                profile.h_spread = min(H_BINS / 2.0, profile.h_spread + 0.5)
+                print(f"h_spread {profile.h_spread:g} bins ({profile.h_spread * H_RANGE / H_BINS:g} deg)")
             elif key == ord("a"):
                 b = sampler.region()
                 if b:
+                    b = _clip_box(b, frame.shape)
                     hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
                     samples.append(hsv[b[1]:b[3], b[0]:b[2]].reshape(-1, 3))
                     resample()

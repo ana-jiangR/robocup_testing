@@ -96,15 +96,14 @@ def render(
         img_pts, _ = cv2.projectPoints(pts_field, rvec, tvec, K, np.zeros(5))
         dst_quad = img_pts.reshape(4, 2).astype(np.float32)
         M = cv2.getPerspectiveTransform(src_quad, dst_quad)
-        # Warp the tag and its white quiet zone in one go.
-        padded = cv2.copyMakeBorder(src, 0, 0, 0, 0, cv2.BORDER_CONSTANT, value=255)
         warped = cv2.warpPerspective(
-            padded, M, (w, h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_TRANSPARENT
+            src, M, (w, h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_TRANSPARENT
         )
         mask = cv2.warpPerspective(
             np.full_like(src, 255), M, (w, h), flags=cv2.INTER_NEAREST
         )
-        # A white margin around the quad, so the tag is not touching grey.
+        # The white quiet zone the detector needs: a margin around the quad,
+        # so the tag is not touching grey.
         margin = cv2.dilate(mask, np.ones((9, 9), np.uint8))
         frame[margin > 0] = 255
         frame[mask > 0] = warped[mask > 0]

@@ -8,7 +8,7 @@ not real: it is whatever vision_core/field.py says it is.
 
 Keys:
     q / Esc  quit            g  grid on/off           t  trails on/off
-    m        mask overlay    w  wall / floor          r  reset trail
+    m        mask overlay    w  wall / floor          r  reset trail and track
     [ / ]    fx -/+ 2%       s  save intrinsics       p  pause
 """
 
@@ -212,7 +212,7 @@ def main() -> None:
         description=__doc__.splitlines()[0],
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="Keys: q quit, g grid, t trails, m mask, w wall/floor, "
-               "[ ] fx, r reset, s save, p pause",
+               "[ ] fx, r reset trail and track, s save, p pause",
     )
     ap.add_argument("--ball-profile", default="test",
                     help="named color profile from calib/ball_color.json "
@@ -402,6 +402,11 @@ def main() -> None:
                 last_t = time.perf_counter()  # do not bill the pause to the filter
             elif key == ord("r"):
                 trail.clear()
+                # BallTracker has no reset(); rebuilding it is the reset. A
+                # stale track is usually what 'r' is pressed to get rid of.
+                tracker = BallTracker(color, transform, K, dist, sigma_px=args.sigma_px,
+                                      sigma_a=args.sigma_a, sigma_a_air=args.sigma_a_air)
+                state = None
             elif key in (ord("["), ord("]")):
                 K = K.copy()
                 K[0, 0] *= 0.98 if key == ord("[") else 1.02

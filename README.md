@@ -124,7 +124,7 @@ you ask; use one, or several at once. Full JSON shape and details in
 | --- | --- |
 | `uv run track-combined --ball-profile NAME --json-out state.json` | One file, **overwritten** every frame — always "the current state" |
 | `uv run track-combined --ball-profile NAME --serve-http 8000` | The same, over `GET http://localhost:8000/state` — works from another machine or language, no filesystem access needed |
-| `uv run track-combined --ball-profile NAME --json-log session.jsonl` | One JSON line **appended** per frame — a full history, not just "right now" |
+| `uv run track-combined --ball-profile NAME --json-log session.jsonl` | One JSON line **appended** per frame — a full history, not just "right now". `*.jsonl` and the `--json-out` files are gitignored: they are run output, not source |
 
 ### Flags that matter
 
@@ -144,10 +144,11 @@ against the wrong physical size until you correct it.
 | `--sequential` | One tag moved to each corner in turn (camera fixed), instead of 4 tags at once | off | `calibrate-field`, `track --calibrate-live` |
 | `--frames-per-corner` | Samples to average at each corner | `15` | `calibrate-field --sequential`, `track --calibrate-live --sequential` |
 | `--tag-id` / `--size-mm` | Which tag id, and initial size in mm on the phone page | `0` / `80` | `serve-tag` |
-| `--ball-profile` | Which named color profile to track | `test` | `track-ball` |
+| `--ball-profile` | Which named color profile to track | `test` | `track-ball`, `track-combined` |
 | `--radius-mm` | The ball's real **radius**, stored in the profile | `20` | `calibrate-ball` |
-| `--cam-height` | Camera height above the field, metres — ignored once `field_pose.json` exists | `1.5` | `track`, `track-ball` |
-| `--print-poses` / `--print-states` | Stream the numbers to the terminal | off | `track` / `track-ball` |
+| `--s-spread` / `--h-spread` | How far the color profile reaches beyond what was sampled, in histogram bins — widen `--s-spread` if the ball vanishes in shade or under another lamp | `4` / `1` | `calibrate-ball` |
+| `--cam-height` | Camera height above the field, metres — ignored once `field_pose.json` exists | `1.5` | `track`, `track-ball`, `track-combined` |
+| `--print-poses` / `--print-states` | Stream the numbers to the terminal | off | `track` / `track-ball`, both in `track-combined` |
 | `--json-out PATH` | Write current detections to a file, overwritten every frame | off | `track-combined` |
 | `--serve-http PORT` | Serve current detections over plain HTTP `GET` | off | `track-combined` |
 | `--json-log PATH` | Append one JSON line per frame — a history, not just current state | off | `track-combined` |

@@ -72,7 +72,10 @@ def generate_field_sheet(
     field_w_mm, field_h_mm = field_mm
     margin_x = (sheet_w_mm - field_w_mm) / 2.0
     margin_y = (sheet_h_mm - field_h_mm) / 2.0
-    if margin_x < tag_mm / 2 or margin_y < tag_mm / 2:
+    # A tag is centred on its corner, so half of it hangs outside the field
+    # rectangle; a margin no bigger than that half puts it off the page, and a
+    # negative slice below would then wrap around the canvas instead of failing.
+    if margin_x <= tag_mm / 2 or margin_y <= tag_mm / 2:
         raise ValueError("field_mm is too close to sheet_mm -- tags would run off the page")
 
     sheet_w_px = int(round(sheet_w_mm * px_per_mm))
@@ -352,7 +355,7 @@ def main() -> None:
     with socketserver.TCPServer(("0.0.0.0", args.port), Handler) as httpd:
         print(f"\nTag {args.tag_id} (tag36h11) is being served.\n")
         print(f"  On your phone, open:   http://{ip}:{args.port}/")
-        print(f"  (phone and laptop must be on the same wifi)\n")
+        print("  (phone and laptop must be on the same wifi)\n")
         print("Then: match the box to a bank card, set the size, tap 'Full screen tag'.")
         print("The page prints the --tag-size value to hand to the tracker.\n")
         print("Ctrl-C to stop.")

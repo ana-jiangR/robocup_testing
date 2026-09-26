@@ -15,8 +15,11 @@ Committed, because this team shares one rig.
 
 > ⚠️ `ball_color.json` is the most fragile of the three. A histogram measured
 > under one set of lights does not transfer to another room, or to daylight
-> versus evening. If the mask looks wrong, re-run `calibrate-ball` rather than
-> assuming a committed profile still applies.
+> versus evening. Each profile carries an `h_spread`/`s_spread` (how far it
+> reaches beyond what was sampled) that absorbs a ball rolling between lamps
+> and shadows in the *same* room; a committed profile that predates those
+> fields gets the defaults on load. If the mask looks wrong, re-run
+> `calibrate-ball` rather than assuming a committed profile still applies.
 
 > ⚠️ If you end up on **different webcams**, gitignore `intrinsics.json`. The
 > loader only rejects a mismatched *resolution*, so two different cameras both at

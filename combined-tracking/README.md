@@ -113,7 +113,9 @@ Each line is flushed to disk immediately, not buffered — a `tail -f` sees a
 new line the moment that frame was processed, no lag waiting for a buffer to
 fill. The file only grows; nothing here rotates or truncates it, so a long
 session can produce a large file — that's on you to manage (delete it,
-`gzip` it, whatever fits), same as any other log file.
+`gzip` it, whatever fits), same as any other log file. `*.jsonl`, `*.json.tmp`
+and the usual `--json-out` names are gitignored so a session does not end up
+in a commit by accident (roughly 10 MB per ten minutes at 30 fps).
 
 Shape (one object, whether it's the single current state from `--json-out`/
 `--serve-http`, or one line of `--json-log`):
