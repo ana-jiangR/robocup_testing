@@ -431,22 +431,44 @@ def _run_synthetic(args, field: Field, layout: dict[int, tuple[float, float]]):
     return result, args.out
 
 
-def _run_live(args, field: Field, layout: dict[int, tuple[float, float]]):
+def _open_live(args):
+    """Open the camera and load intrinsics for the size it ACTUALLY delivers.
+
+    Not args.width/height: a camera that ignores the request (640x480 when
+    asked for 1280x720) would otherwise miss the real calibration, fall back to
+    a guessed lens for the wrong image size, and solve the field ~2x too far
+    away -- with no error, just a field that lines up at one corner only.
+    """
     from vision_core.intrinsics import load as load_intrinsics
 
-    K, dist, intr_source = load_intrinsics(args.width, args.height)
-    print(f"intrinsics: {intr_source}")
-    print(f"looking for reference tags {sorted(layout)} at {layout}")
-    print(f"hold the camera steady on the field; capturing until {args.min_frames}+ good frames")
-    print("'q' to finish once enough are captured, Esc to abort.\n")
-
     cap = open_camera(args.camera, args.width, args.height)
+    ok, frm = read_frame(cap)
+    if not ok:
+        cap.release()
+        raise RuntimeError("camera opened but returned no frame")
+    h, w = frm.shape[:2]
+    K, dist, intr_source = load_intrinsics(w, h)
+    print(f"intrinsics: {intr_source}")
+    if not intr_source.startswith("charuco"):
+        print(f"\nWARNING: no measured lens calibration for {w}x{h}. The field pose will "
+              f"be solved with a guessed lens and every distance can be off by tens of %.\n"
+              f"Run 'uv run calibrate-camera --camera {args.camera} --width {w} --height {h}' "
+              f"first unless this is only a rough test.\n")
 
     def _read_bgr() -> np.ndarray:
         ok, frm = read_frame(cap)
         if not ok:
             raise RuntimeError("camera stopped returning frames")
         return frm
+
+    return cap, _read_bgr, K, dist, f"{w}x{h}, {intr_source}"
+
+
+def _run_live(args, field: Field, layout: dict[int, tuple[float, float]]):
+    cap, _read_bgr, K, dist, lens_note = _open_live(args)
+    print(f"looking for reference tags {sorted(layout)} at {layout}")
+    print(f"hold the camera steady on the field; capturing until {args.min_frames}+ good frames")
+    print("'q' to finish once enough are captured, Esc to abort.\n")
 
     try:
         frames = capture_reference_frames(
@@ -463,6 +485,7 @@ def _run_live(args, field: Field, layout: dict[int, tuple[float, float]]):
         f"agreement across frames: rotation spread {result.rotation_spread_deg:.3f} deg, "
         f"translation spread {result.translation_spread_m * 1000:.2f} mm"
     )
+    result.transform.source += f" ({lens_note})"
     return result, (args.out or str(field_pose_path()))
 
 
@@ -507,21 +530,10 @@ def _run_synthetic_sequential(args, field: Field, layout: dict[int, tuple[float,
 
 
 def _run_live_sequential(args, field: Field, layout: dict[int, tuple[float, float]]):
-    from vision_core.intrinsics import load as load_intrinsics
-
-    K, dist, intr_source = load_intrinsics(args.width, args.height)
-    print(f"intrinsics: {intr_source}")
+    cap, _read_bgr, K, dist, lens_note = _open_live(args)
     print(f"one tag, moved to {len(layout)} positions in turn: {list(layout.values())}")
     print("camera stays fixed. At each position: hold the tag steady, then")
     print("'q' confirms and moves to the next corner ('r' retries this one), Esc aborts.\n")
-
-    cap = open_camera(args.camera, args.width, args.height)
-
-    def _read_bgr() -> np.ndarray:
-        ok, frm = read_frame(cap)
-        if not ok:
-            raise RuntimeError("camera stopped returning frames")
-        return frm
 
     try:
         averaged = capture_sequential_corners(
@@ -535,6 +547,7 @@ def _run_live_sequential(args, field: Field, layout: dict[int, tuple[float, floa
     print(f"\n{result.transform.source}")
     print(f"reprojection error: {result.reproj_error_px:.3f} px rms, "
           f"{result.max_reproj_error_px:.3f} px max")
+    result.transform.source += f" ({lens_note})"
     return result, (args.out or str(field_pose_path()))
 
 
