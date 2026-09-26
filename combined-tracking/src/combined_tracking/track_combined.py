@@ -222,7 +222,6 @@ def tag_state_to_dict(s: TagFieldState, max_coast_s: float) -> dict:
         "omega_deg": s.omega_deg,
         "inside": s.inside,
         "visible": s.visible,
-        "age": s.age,
         "off_plane_m": s.off_plane_m,
         "age": s.age,
         "lost": s.age > max_coast_s,
@@ -450,7 +449,7 @@ class LatestFrameGrabber:
 
     def _run(self) -> None:
         while not self._stopping:
-            ok, frame = self._cap.read()
+            ok, frame = read_frame(self._cap)
             t_capture, t_perf = time.time(), time.perf_counter()
             with self._cond:
                 if not ok:
@@ -781,6 +780,7 @@ def main() -> None:
                     print("camera stopped returning frames")
                     break
                 frame, t_capture, t_perf = got
+                frame_no += 1
                 # dt between *captures*, not between loop iterations: when the
                 # grabber drops a frame, the filters are told the real gap.
                 dt = t_perf - last_t
@@ -838,7 +838,8 @@ def main() -> None:
                         "capture_dropped": grabber.dropped,
                         "ball_dropouts": ball_dropouts,
                     }
-                    doc = build_state_doc(field, tag_states, ball_state, run_id, frame_no, seq=seq,
+                    doc = build_state_doc(field, tag_states, ball_state, seq=seq,
+                                          run_id=run_id, frame=frame_no,
                                           t_capture=t_capture,
                                           tag_max_coast_s=tag_tracker.max_coast_s,
                                           stats=stats)
