@@ -19,6 +19,11 @@ dependencies = [
 [project.scripts]
 track-combined = "combined_tracking.track_combined:main"
 
+[project.optional-dependencies]
+zmq = [
+    "pyzmq>=27.2.0",
+]
+
 [tool.uv.sources]
 vision-core = { workspace = true }
 tag-tracking = { workspace = true }

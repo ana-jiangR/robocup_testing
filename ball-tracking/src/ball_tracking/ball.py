@@ -60,6 +60,9 @@ class BallFieldState:
     grounded: bool  # touching the field, so x/y are the precise ray/plane answer
     visible: bool  # seen in this frame; False means the filter is coasting
     age: float  # seconds since the ball was last actually seen
+    #: Unseen for longer than the filter will coast. x/y/z are then held where
+    #: the coast ran out and vx/vy/speed read 0 -- a position, not a prediction.
+    lost: bool = False
 
     def inside(self, field: Field) -> bool:
         return field.contains(self.x, self.y)
@@ -347,6 +350,14 @@ class BallFilter:
     def predict(self, dt: float) -> None:
         if not self.initialised or dt <= 0.0:
             return
+        if self.lost():
+            # Past the coast limit the prediction is no longer an estimate of
+            # anything, just the last velocity integrated for as long as the
+            # ball stays hidden: 13 s at 0.5 m/s carried one session's ball
+            # six metres off a 0.8 m field. Hold it where the coast ran out and
+            # let the clock keep running, so age still says how stale it is.
+            self.age += dt
+            return
         sigma = self.sigma_a if self.grounded else self.sigma_a_air
         self.kf.predict(cv_transition(dt, 3), cv_process_noise(dt, [sigma] * 3))
         self.age += dt
@@ -451,7 +462,10 @@ class BallFilter:
 
     def state(self, visible: bool) -> BallFieldState:
         x = self.kf.x
-        vx, vy = float(x[3]), float(x[4])
+        lost = self.lost()
+        # A held position is not moving. Reporting the stale velocity next to
+        # it would invite a reader to extrapolate exactly what predict() stopped.
+        vx, vy = (0.0, 0.0) if lost else (float(x[3]), float(x[4]))
         speed = float(np.hypot(vx, vy))
         direction = float(np.degrees(np.arctan2(vy, vx))) if speed > SPEED_EPS else 0.0
         return BallFieldState(
@@ -465,6 +479,7 @@ class BallFilter:
             grounded=self.grounded,
             visible=visible,
             age=float(self.age),
+            lost=lost,
         )
 
 
@@ -607,7 +622,7 @@ class BallTracker:
 
     def predicted_pixel(self) -> tuple[tuple[float, float], float] | None:
         """Where the filter thinks the ball will appear, and how big. Or None."""
-        if not self.filter.initialised:
+        if not self.filter.initialised or self.filter.lost():
             return None
         p_cam = self.transform.field_to_camera(self.filter.position)[0]
         if p_cam[2] <= 1e-3:
@@ -620,6 +635,10 @@ class BallTracker:
 
     def update(self, frame_bgr: np.ndarray, dt: float) -> BallFieldState | None:
         """Process one frame. Returns None only before the ball is ever seen.
+
+        Unseen for longer than the filter's max_coast_s, the state comes back
+        with lost=True, held where the coast ran out rather than extrapolated,
+        and the next sighting starts a fresh track wherever the ball turns up.
 
         `dt` must be *measured*, not assumed: sample perf_counter right after
         cap.read() and pass the difference. A filter fed a nominal 1/30 while the
@@ -653,7 +672,11 @@ class BallTracker:
         if point is None:
             return self.filter.state(visible=False) if self.filter.initialised else None
 
-        if not self.filter.initialised:
+        if not self.filter.initialised or self.filter.lost():
+            # Unseen or gated out for longer than the ball could plausibly be
+            # hidden: the track is stale rather than occluded, and its held
+            # position and velocity are not worth gating a sighting against.
+            # Start over on what we see.
             self.filter.start(point, grounded=not use_air)
             return self.filter.state(visible=True)
 
@@ -667,11 +690,5 @@ class BallTracker:
             accepted = self.filter.update_grounded(
                 np.asarray(point)[:2], obs.sigma_xy, self.radius_m, jump=jump
             )
-
-        if not accepted and self.filter.lost():
-            # Gated out for longer than the ball could plausibly be hidden. The
-            # track is stale rather than occluded, so restart it on what we see
-            # instead of coasting forever on a stale prediction.
-            self.filter.start(point, grounded=not use_air)
 
         return self.filter.state(visible=accepted)

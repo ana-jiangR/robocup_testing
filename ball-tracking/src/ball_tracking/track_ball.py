@@ -163,7 +163,9 @@ def draw_readout(
                     (120, 120, 160), 1, cv2.LINE_AA)
         return
 
-    if not state.visible:
+    if state.lost:
+        status, color = f"LOST {state.age:4.1f} s (held)", GHOST_COLOR
+    elif not state.visible:
         status, color = f"COASTING {state.age * 1000:3.0f} ms", GHOST_COLOR
     elif not state.grounded:
         status, color = "AIRBORNE", AIR_COLOR

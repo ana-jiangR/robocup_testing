@@ -54,19 +54,64 @@ def read_key(delay_ms: int = 1) -> int:
     return key + 32 if ord("A") <= key <= ord("Z") else key
 
 
-def open_camera(index: int, width: int, height: int) -> cv2.VideoCapture:
-    """Open a camera, trying backends in an OS-appropriate order."""
+def _fourcc_str(value: float) -> str | None:
+    """cv2's FOURCC property, a packed int returned as a float, as 4 letters.
+
+    None when it is not 4 printable letters: DSHOW on some webcams answers
+    every FOURCC read with the same junk number whatever the format really is.
+    """
+    v = int(value) & 0xFFFFFFFF
+    s = "".join(chr((v >> (8 * i)) & 0xFF) for i in range(4))
+    return s if s.isascii() and s.isprintable() else None
+
+
+def open_camera(
+    index: int,
+    width: int,
+    height: int,
+    *,
+    fourcc: str | None = None,
+    buffersize: int | None = None,
+) -> cv2.VideoCapture:
+    """Open a camera, trying backends in an OS-appropriate order.
+
+    `fourcc` (e.g. "MJPG") asks for a pixel format, and has to be set before
+    the resolution: DSHOW picks the format when the size is written, so a
+    FOURCC written afterwards is ignored. MJPG is what lets most USB webcams
+    reach 720p at 30 fps or better; raw YUY2 at that size saturates USB 2.
+
+    `buffersize` asks the driver to queue at most that many frames. Only some
+    backends honour it (V4L2 and some DSHOW drivers; plenty of DSHOW webcams
+    do not even report it), and the result is printed either way rather than
+    assumed.
+    """
     last = None
     for api, name in _backends():
         cap = cv2.VideoCapture(index, api)
         if cap.isOpened():
+            if fourcc is not None:
+                cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*fourcc))
             cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
             cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+            if buffersize is not None:
+                cap.set(cv2.CAP_PROP_BUFFERSIZE, buffersize)
             ok, _ = cap.read()
             if ok:
                 got_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
                 got_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
                 print(f"camera {index} open via {name} at {got_w}x{got_h}")
+                if fourcc is not None:
+                    got = _fourcc_str(cap.get(cv2.CAP_PROP_FOURCC))
+                    if got is None:
+                        print(f"  asked for {fourcc}; pixel format not reported by this "
+                              "backend (check the fps instead)")
+                    else:
+                        print(f"  pixel format {got}" + (
+                            "" if got == fourcc else f" (asked for {fourcc}; camera refused)"))
+                if buffersize is not None:
+                    got_buf = cap.get(cv2.CAP_PROP_BUFFERSIZE)
+                    print(f"  driver buffer {got_buf:g} frame(s)" if got_buf > 0 else
+                          "  driver buffer size not reported by this backend")
                 # A camera remembers the last run's lock, so this one can open
                 # already frozen -- on a stale manual exposure, that is the dark
                 # green picture nobody can account for. Start from auto every

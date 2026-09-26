@@ -74,6 +74,9 @@ Once the window is open, in this order:
    in the bottom strip change. The trail should be smooth, not jagged.
 3. **Lift it 20 cm** and the state flips to airborne. Put it down, it flips back.
 4. **Cover it** with your hand: the marker greys out and coasts, then recovers.
+   Keep it covered past about a third of a second and the readout says `LOST`
+   and the marker stops where it is, instead of drifting off on its last
+   velocity.
 
 If `calib/field_pose.json` exists (from `uv run calibrate-field` in tag-tracking,
 with four reference tags on the field corners), it is loaded automatically and
@@ -239,7 +242,14 @@ class BallFieldState:
     grounded: bool            # x/y are the precise ray/plane answer
     visible: bool             # False means the filter is coasting
     age: float                # seconds since actually seen
+    lost: bool                # unseen past max_coast_s (0.35 s): position held, velocity 0
 ```
+
+Once `lost`, the position stops being extrapolated. It holds where the coast
+ran out, with `vx`/`vy`/`speed` at 0, until the ball is seen again, and that
+sighting starts a fresh track. Before this, a hidden ball coasted on its last
+velocity for as long as it stayed hidden, which is metres off the field
+within seconds.
 
 ## Troubleshooting
 

@@ -116,7 +116,7 @@ once and runs both detectors against the same frame, for exactly this case.
 ### Getting live positions into another program
 
 `track-combined` can publish what it's tracking to another process — a
-simulator, another repo, anything — three independent ways. All off unless
+simulator, another repo, anything — four independent ways. All off unless
 you ask; use one, or several at once. Full JSON shape and details in
 [`combined-tracking`'s README](combined-tracking/#feeding-another-program).
 
@@ -125,6 +125,7 @@ you ask; use one, or several at once. Full JSON shape and details in
 | `uv run track-combined --ball-profile NAME --json-out state.json` | One file, **overwritten** every frame — always "the current state" |
 | `uv run track-combined --ball-profile NAME --serve-http 8000` | The same, over `GET http://localhost:8000/state` — works from another machine or language, no filesystem access needed |
 | `uv run track-combined --ball-profile NAME --json-log session.jsonl` | One JSON line **appended** per frame — a full history, not just "right now". `*.jsonl` and the `--json-out` files are gitignored: they are run output, not source |
+| `uv run track-combined --ball-profile NAME --no-window --zmq-pub tcp://*:5556` | Every frame **pushed** on a ZeroMQ PUB socket as it happens, no window drawn — for a simulator mirroring the field live. Needs the optional extra once: `uv sync --all-packages --extra zmq` |
 
 ### Flags that matter
 
