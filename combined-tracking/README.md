@@ -187,6 +187,7 @@ message:
 
 ```json
 {
+  "run_id": "20260919-162120", "frame": 1234,
   "seq": 1842,
   "timestamp": 1790437358.3149,
   "t_capture": 1790437358.2909,
@@ -196,7 +197,7 @@ message:
     {
       "id": 4, "x": 0.612, "y": 0.388, "theta_deg": 19.98,
       "vx": 0.051, "vy": -0.012, "speed": 0.052, "direction_deg": -13.2, "omega_deg": 1.4,
-      "inside": true, "visible": true, "off_plane_m": 0.004, "age": 0.0, "lost": false
+      "inside": true, "visible": true, "age": 0.0, "off_plane_m": 0.004, "age": 0.0, "lost": false
     }
   ],
   "ball": {

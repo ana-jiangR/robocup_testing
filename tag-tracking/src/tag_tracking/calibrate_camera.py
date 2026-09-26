@@ -14,12 +14,13 @@ track.py (and any future skill) picks it up automatically.
 from __future__ import annotations
 
 import argparse
+import time
 from pathlib import Path
 
 import cv2
 import numpy as np
 from vision_core import intrinsics as intr
-from vision_core.camera import open_camera, read_key
+from vision_core.camera import open_camera, read_frame, read_key
 from vision_core.charuco import (
     MIN_FRAMES,
     SyntheticChArucoCamera,
@@ -28,6 +29,24 @@ from vision_core.charuco import (
 )
 
 MAX_LIVE_FRAMES = 60
+#: A view only counts if its corners sit at least this far (median, px) from
+#: the last captured view, and at least MIN_VIEW_GAP_S after it. Without that a
+#: 30 fps camera fills all MAX_LIVE_FRAMES from one pose in two seconds, and
+#: the calibration never sees the tilts and frame corners it needs. Compared
+#: to the last view only, not every view: against all of them, a board that
+#: returns to an area already covered is rejected forever and the count stalls.
+MIN_VIEW_CHANGE_PX = 25.0
+MIN_VIEW_GAP_S = 0.3
+
+
+def _is_new_view(view: dict[int, np.ndarray], last: dict[int, np.ndarray] | None) -> bool:
+    if last is None:
+        return True
+    shared = view.keys() & last.keys()
+    if len(shared) < 4:
+        return True
+    moved = np.median([np.linalg.norm(view[i] - last[i]) for i in shared])
+    return moved >= MIN_VIEW_CHANGE_PX
 
 
 def _run_synthetic(args):
@@ -77,13 +96,26 @@ def _run_live(args):
 
     cap = open_camera(args.camera, args.width, args.height)
     frames = []
+    last_view: dict[int, np.ndarray] | None = None
+    last_view_t = 0.0
+    coverage: list[np.ndarray] = []  # every captured corner, drawn so gaps show
+    size = None
     win = "calibrate-camera"
     cv2.namedWindow(win, cv2.WINDOW_AUTOSIZE)
     try:
         while True:
-            ok, bgr = cap.read()
+            ok, bgr = read_frame(cap)
             if not ok:
                 raise RuntimeError("camera stopped returning frames")
+            if size is None:
+                # Calibrate, and save, at the size the camera actually delivers --
+                # it may not honour --width/--height, and a K keyed to the wrong
+                # resolution is silently wrong everywhere it loads.
+                size = (bgr.shape[1], bgr.shape[0])
+                if size != (args.width, args.height):
+                    print(f"note: asked for {args.width}x{args.height}, camera gives "
+                          f"{size[0]}x{size[1]} -- calibrating at {size[0]}x{size[1]}; "
+                          f"pass that --width/--height to every other command")
             grey = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
             ch_corners, ch_ids, _mk_corners, mk_ids = detector.detectBoard(grey)
             disp = cv2.cvtColor(grey, cv2.COLOR_GRAY2BGR)
@@ -99,19 +131,34 @@ def _run_live(args):
                 ch_corners is not None and ch_ids is not None
                 and len(ch_corners) >= 6 and len(ch_corners) == len(ch_ids)
             )
+            for pt in coverage:
+                cv2.circle(disp, (int(round(pt[0])), int(round(pt[1]))), 2,
+                           (255, 160, 0), -1, cv2.LINE_AA)
+            new_view = False
             if good:
-                for pt in np.asarray(ch_corners, dtype=np.float64).reshape(-1, 2):
+                pts = np.asarray(ch_corners, dtype=np.float64).reshape(-1, 2)
+                for pt in pts:
                     cv2.circle(disp, (int(round(pt[0])), int(round(pt[1]))), 5,
                                (0, 255, 0), -1, cv2.LINE_AA)
-                if len(frames) < MAX_LIVE_FRAMES:
+                view = dict(zip(np.asarray(ch_ids).ravel().tolist(), pts))
+                new_view = (_is_new_view(view, last_view)
+                            and time.monotonic() - last_view_t >= MIN_VIEW_GAP_S)
+                if new_view and len(frames) < MAX_LIVE_FRAMES:
                     frames.append(grey)
+                    last_view, last_view_t = view, time.monotonic()
+                    coverage.extend(pts)
             cv2.putText(
                 disp,
-                f"captured {len(frames)}  (need {args.min_frames}+)   "
-                f"markers seen {n_seen}/{n_markers}",
+                f"captured {len(frames)}/{args.min_frames}"
+                f"{'  -- q to finish' if len(frames) >= args.min_frames else ''}"
+                f"   (markers in view {n_seen}/{n_markers}, need not be all)",
                 (10, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.65,
                 (0, 255, 0) if good else (0, 0, 255), 2, cv2.LINE_AA,
             )
+            if good and not new_view and len(frames) < MAX_LIVE_FRAMES:
+                cv2.putText(disp, "keep moving -- tilt it, or take it to a new part of "
+                            "the frame", (10, 54),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 165, 255), 1, cv2.LINE_AA)
             if not good:
                 hint = (
                     "no markers visible -- move the board into frame" if n_seen == 0 else
@@ -130,12 +177,15 @@ def _run_live(args):
         cap.release()
         cv2.destroyAllWindows()
 
-    result = calibrate_intrinsics(
-        frames, board, (args.width, args.height), min_frames=args.min_frames
-    )
+    args.width, args.height = size  # main() saves under these
+    result = calibrate_intrinsics(frames, board, size, min_frames=args.min_frames)
     print(f"\nK =\n{result.K}")
     print(f"distortion = {result.dist}")
     print(f"rms reprojection error: {result.rms_reproj_px:.3f} px over {result.n_frames} views")
+    print(f"horizontal field of view: {intr.hfov_of(result.K, size[0]):.1f} deg")
+    if result.rms_reproj_px > 1.0:
+        print("warning: rms above 1 px -- blurry views, a board that is not flat, or the "
+              "wrong board. Consider re-running before trusting this.")
     return result, (args.out or True)  # live mode always saves; True means "default path"
 
 

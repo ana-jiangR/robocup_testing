@@ -31,7 +31,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-from vision_core.camera import list_cameras, lock_camera, unlock_camera, open_camera, read_key
+from vision_core.camera import list_cameras, lock_camera, unlock_camera, open_camera, read_frame, read_key
 from vision_core.paths import calib_path
 
 #: Shared across skills -- it describes the camera's view of a ball, and lives
@@ -249,12 +249,22 @@ def histogram_from_samples(samples_hsv: np.ndarray, s_min: int) -> np.ndarray:
     Low-saturation pixels go first: a grey pixel's hue is whatever rounding says,
     and leaving them in smears the histogram across the whole spectrum.
     """
-    s = samples_hsv.reshape(-1, 3)
-    s = s[s[:, 1] >= s_min]
-    if len(s) < 50:
+    all_px = samples_hsv.reshape(-1, 3)
+    if len(all_px) == 0:
         raise ValueError(
-            f"only {len(s)} usable pixels after the S>={s_min} cut. Sample a bigger "
-            f"patch of the ball, add light, or lower --s-min."
+            "the box held no video pixels -- drag over the ball on the left "
+            "(video) half of the window, not the mask on the right."
+        )
+    s = all_px[all_px[:, 1] >= s_min]
+    if len(s) < 50:
+        # Say what was sampled, so a washed-out ball (low S) can be told apart
+        # from a too-small patch.
+        med_s = int(np.median(all_px[:, 1]))
+        med_v = int(np.median(all_px[:, 2]))
+        raise ValueError(
+            f"only {len(s)} of {len(all_px)} sampled pixels pass S>={s_min} "
+            f"(patch median S={med_s}, V={med_v}). Sample a bigger patch of the "
+            f"ball, add light, or lower --s-min."
         )
     hist = cv2.calcHist(
         [s.reshape(-1, 1, 3)], [0, 1], None, [H_BINS, S_BINS], [0, H_RANGE, 0, S_RANGE]
@@ -517,7 +527,7 @@ def main() -> None:
                 print(f"sample rejected: {e}")
 
         while True:
-            ok, frame = cap.read()
+            ok, frame = read_frame(cap)
             if not ok:
                 print("camera stopped returning frames")
                 break

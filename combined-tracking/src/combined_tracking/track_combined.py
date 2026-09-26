@@ -50,7 +50,7 @@ from tag_tracking.pose import TagFieldPose, tag_field_pose
 from tag_tracking.track import GHOST_COLOR as TAG_GHOST_COLOR
 from tag_tracking.track import VELOCITY_COLOR, draw_tag_marks, suppressed_stderr
 from vision_core import intrinsics as intr
-from vision_core.camera import list_cameras, lock_camera, open_camera, read_key, unlock_camera
+from vision_core.camera import list_cameras, lock_camera, open_camera, read_frame, read_key, unlock_camera
 from vision_core.field import (
     CameraFieldTransform,
     Field,
@@ -222,6 +222,7 @@ def tag_state_to_dict(s: TagFieldState, max_coast_s: float) -> dict:
         "omega_deg": s.omega_deg,
         "inside": s.inside,
         "visible": s.visible,
+        "age": s.age,
         "off_plane_m": s.off_plane_m,
         "age": s.age,
         "lost": s.age > max_coast_s,
@@ -254,6 +255,8 @@ def build_state_doc(
     t_capture: float,
     tag_max_coast_s: float,
     stats: dict,
+    run_id: str,
+    frame: int,
 ) -> dict:
     """The current frame's detections as one plain dict -- the single source
     of truth every publisher (--json-out, --serve-http, --json-log,
@@ -265,10 +268,16 @@ def build_state_doc(
 
     `timestamp` predates t_capture/t_publish and is kept for readers that
     already use it; it is the same instant as t_publish, not the capture.
+
+    `run_id` is fixed for one launch and `frame` counts up by one per camera
+    frame, so a reader can split an appended --json-log into runs and tell a
+    stalled loop (timestamp jumps, frame +1) from missing lines (frame skips).
     """
     t_publish = time.time()
     return {
         "seq": seq,
+        "run_id": run_id,
+        "frame": frame,
         "timestamp": t_publish,
         "t_capture": t_capture,
         "t_publish": t_publish,
@@ -556,6 +565,13 @@ def main() -> None:
                     help="tag filter process noise, m/s^2 (raise for a fast robot)")
     ap.add_argument("--tag-sigma-alpha", type=float, default=180.0,
                     help="tag filter process noise for turning, deg/s^2")
+    ap.add_argument("--tag-coast", type=float, default=0.5, metavar="SECONDS",
+                    help="keep reporting a tag on its predicted motion (visible: false) "
+                         "for this long after it was last seen, before dropping it "
+                         "from the output (default 0.5). Raise it so a JSON reader "
+                         "sees fewer tags vanish; the cost is a stale estimate if "
+                         "the robot really did leave, and slower re-acquire after "
+                         "it is picked up and moved")
     # -- ball-specific ---------------------------------------------------
     ap.add_argument("--ball-profile", default="test",
                     help="named color profile from calib/ball_color.json "
@@ -694,7 +710,7 @@ def main() -> None:
         locked = True
 
     try:
-        ok, frame = cap.read()
+        ok, frame = read_frame(cap)
         if not ok:
             raise SystemExit("camera opened but the first frame failed")
         h, w = frame.shape[:2]
@@ -709,7 +725,8 @@ def main() -> None:
         tag_detector = pa.Detector(families="tag36h11", nthreads=4, quad_decimate=1.0,
                                    decode_sharpening=0.25)
         tag_tracker = TagTracker(field, sigma_a=args.tag_sigma_a,
-                                 sigma_alpha_deg=args.tag_sigma_alpha)
+                                 sigma_alpha_deg=args.tag_sigma_alpha,
+                                 max_coast_s=args.tag_coast)
         ball_tracker = _new_ball_tracker(args, color, transform, K)
 
         plan = PlanView(field, height=h, mode=mode)
@@ -721,6 +738,8 @@ def main() -> None:
         off_plane = OffPlaneWatch(synthetic=not using_calibrated)
         seq = 0
         ball_dropouts = 0
+        run_id = time.strftime("%Y%m%d-%H%M%S")
+        frame_no = 0
 
         # Whole-frame undistortion: the tag detector searches the entire
         # image, so it (and the overlay drawn on top of it) need to share one
@@ -819,7 +838,7 @@ def main() -> None:
                         "capture_dropped": grabber.dropped,
                         "ball_dropouts": ball_dropouts,
                     }
-                    doc = build_state_doc(field, tag_states, ball_state, seq=seq,
+                    doc = build_state_doc(field, tag_states, ball_state, run_id, frame_no, seq=seq,
                                           t_capture=t_capture,
                                           tag_max_coast_s=tag_tracker.max_coast_s,
                                           stats=stats)

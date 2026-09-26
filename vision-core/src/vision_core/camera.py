@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import math
 import sys
+import time
 
 import cv2
 
@@ -134,6 +135,26 @@ def open_camera(
         f"could not open camera {index} ({last or 'no backend worked'}).\n"
         f"Try --list-cameras, close Teams/Zoom or other apps using the camera, or {hint}."
     )
+
+
+def read_frame(cap: cv2.VideoCapture, timeout_s: float = 2.0):
+    """cap.read(), but riding out a brief dropout instead of reporting it.
+
+    A USB webcam -- on macOS/AVFoundation especially -- returns the odd
+    failed read right after opening, after an exposure change, or on a USB
+    hiccup, then carries on as normal. Treating one of those as "the camera
+    is gone" kills a calibration minutes in. Keep asking for up to
+    `timeout_s`; only a camera that stays silent that long counts as stopped.
+    Same (ok, frame) return as cap.read().
+    """
+    deadline = time.monotonic() + timeout_s
+    while True:
+        ok, frame = cap.read()
+        if ok and frame is not None:
+            return True, frame
+        if time.monotonic() >= deadline:
+            return False, None
+        time.sleep(0.01)
 
 
 def list_cameras(count: int = 5) -> None:
