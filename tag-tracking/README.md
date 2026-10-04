@@ -244,7 +244,11 @@ Hold the camera steady on the field; it captures frames until all four
 reference tags have been seen 10+ times, then reports rotation/translation
 spread across those frames — a small spread means the solve is stable, a large
 one means something is loose or a tag ID is ambiguous. Saves to
-`calib/field_pose.json`.
+`calib/field_pose.json`, together with the `--field` size, so you pass your
+measured size **once, here**: `track`, `track-ball` and `track-combined` all
+default to it, and warn if you pass a different `--field` later. A file saved
+before this has no size in it and falls back to `1.2 0.8`, as before — re-run
+`calibrate-field --field W H` (or `--pick-origin --field W H`) to stamp it.
 
 #### Choosing where `(0,0)` is
 

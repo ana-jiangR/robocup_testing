@@ -137,7 +137,7 @@ against the wrong physical size until you correct it.
 
 | Flag | Meaning | Default | Used by |
 | --- | --- | --- | --- |
-| `--field W H` | Real field size, in metres | `1.2 0.8` | `calibrate-field`, `track` (incl. `--calibrate-live`, `--synthetic-camera`) |
+| `--field W H` | Real field size, in metres. Saved with the calibration, so after `calibrate-field --field W H` every tracker uses it without being told | the saved size, else `1.2 0.8` | `calibrate-field`, `track` (incl. `--calibrate-live`, `--synthetic-camera`), `track-ball`, `track-combined` |
 | `--tag-size` | Real black-square tag size, in metres | `0.080` | `track` (incl. `--calibrate-live`, `--synthetic-camera`) |
 | `--camera N` | Which webcam index to use | `0` | `calibrate-camera`, `calibrate-field`, `track` |
 | `--out PATH` | Where to save the calibration result | `calib/...` at repo root | `calibrate-camera`, `calibrate-field` |

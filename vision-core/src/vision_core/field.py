@@ -316,6 +316,9 @@ class ReferenceTagFieldTransform(CameraFieldTransform):
     #: the custom origin, in corner coords, that R/t have been shifted to --
     #: or None for the default (the first corner).
     origin: tuple[float, float] | None = None
+    #: (width, height) in metres of the field this pose was solved for, or None
+    #: for a file saved before the size was recorded.
+    field_size: tuple[float, float] | None = None
 
     def with_origin(self, origin: tuple[float, float] | None) -> ReferenceTagFieldTransform:
         """This pose re-expressed so `origin` (corner coords) reads (0, 0).
@@ -329,6 +332,7 @@ class ReferenceTagFieldTransform(CameraFieldTransform):
             t = t_corner + self.R @ np.array([*origin, 0.0])
         out = type(self)(self.R, t, self.source)
         out.origin = origin
+        out.field_size = self.field_size
         return out
 
     @classmethod
@@ -402,6 +406,8 @@ class ReferenceTagFieldTransform(CameraFieldTransform):
         alongside as `origin`, so dropping that key restores the default."""
         corner = self.with_origin(None)
         d = {"R": corner.R.tolist(), "t": corner.t.tolist(), "source": self.source}
+        if self.field_size is not None:
+            d["field"] = {"width": self.field_size[0], "height": self.field_size[1]}
         if self.origin is not None:
             d["origin"] = list(self.origin)
         Path(path).write_text(json.dumps(d, indent=2))
@@ -412,9 +418,43 @@ class ReferenceTagFieldTransform(CameraFieldTransform):
         positions relative to it -- pair it with field.relative_to(t.origin)."""
         d = json.loads(Path(path).read_text())
         t = cls(np.array(d["R"]), np.array(d["t"]), d.get("source", str(path)))
+        t.field_size = saved_field_size(path)
         if use_origin and d.get("origin") is not None:
             t = t.with_origin(tuple(d["origin"]))
         return t
+
+
+DEFAULT_FIELD_SIZE = (1.2, 0.8)
+
+
+def saved_field_size(path: str | Path | None) -> tuple[float, float] | None:
+    """The field (width, height) stored in a field_pose.json, or None."""
+    if path is None or not Path(path).exists():
+        return None
+    f = json.loads(Path(path).read_text()).get("field")
+    return None if f is None else (float(f["width"]), float(f["height"]))
+
+
+def resolve_field(arg: list[float] | None, pose_path: str | Path | None) -> Field:
+    """The field to use: --field if given, else the size saved with the
+    calibration at `pose_path` (None: don't look), else 1.2 x 0.8.
+
+    An explicit --field that disagrees with the saved size is used anyway, but
+    loudly -- the pose was solved for the saved one, so positions near the far
+    edges would be judged against the wrong rectangle.
+    """
+    saved = saved_field_size(pose_path)
+    if arg is not None:
+        w, h = float(arg[0]), float(arg[1])
+        if saved is not None and not np.allclose((w, h), saved, atol=1e-3):
+            print(f"WARNING: --field {w:g} {h:g} differs from the {saved[0]:g} x "
+                  f"{saved[1]:g} m saved with the calibration in {pose_path}. "
+                  f"Using --field; drop it to use the calibrated size.")
+        return Field(w, h)
+    if saved is not None:
+        print(f"field {saved[0]:g} x {saved[1]:g} m (saved with the calibration)")
+        return Field(*saved)
+    return Field(*DEFAULT_FIELD_SIZE)
 
 
 def saved_origin(path: str | Path) -> tuple[float, float] | None:

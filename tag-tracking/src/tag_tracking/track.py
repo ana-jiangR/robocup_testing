@@ -44,6 +44,7 @@ from vision_core.field import (
     Field,
     ReferenceTagFieldTransform,
     SyntheticFieldTransform,
+    resolve_field,
 )
 from vision_core.planview import OUT_COLOR, PlanView, color_for, draw_field
 
@@ -218,7 +219,9 @@ def main() -> None:
     ap.add_argument("--tag-size", type=float, default=0.080,
                     help="black-square width in metres (default 0.080)")
     ap.add_argument("--field", type=float, nargs=2, metavar=("W", "H"),
-                    default=[1.2, 0.8], help="field size in metres (default 1.2 0.8)")
+                    default=None,
+                    help="field size in metres (default: the size saved with the "
+                         "calibration, else 1.2 0.8)")
     ap.add_argument("--mode", choices=["wall", "floor"], default=None,
                     help="virtual field standing up facing you, or lying flat "
                          "(default wall; --synthetic-camera defaults to floor instead, "
@@ -288,7 +291,9 @@ def main() -> None:
         list_cameras()
         return
 
-    field = Field(args.field[0], args.field[1])
+    pose_path = Path(args.field_pose) if args.field_pose else field_pose_path()
+    field = resolve_field(
+        args.field, None if (args.synthetic_camera or args.synthetic_field) else pose_path)
     mode = args.mode or ("floor" if args.synthetic_camera else "wall")
     cap = None
     sim_cam = None
@@ -388,6 +393,7 @@ def main() -> None:
             # A custom origin is a point on the field, not on the camera, so it
             # survives re-solving the pose: carry it over into the new file.
             transform = transform.with_origin(saved_origin(out_path))
+            transform.field_size = (field.width, field.height)
             transform.save(out_path)
             print(f"saved {out_path}\n")
             if args.corner_origin:

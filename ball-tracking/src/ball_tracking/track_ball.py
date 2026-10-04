@@ -29,6 +29,7 @@ from vision_core.field import (
     ReferenceTagFieldTransform,
     SyntheticFieldTransform,
     field_pose_path,
+    resolve_field,
 )
 from vision_core.planview import OUT_COLOR, PlanView, draw_field
 
@@ -222,7 +223,9 @@ def main() -> None:
     ap.add_argument("--ball-radius", type=float, default=None,
                     help="override the profile's ball RADIUS, in metres")
     ap.add_argument("--field", type=float, nargs=2, metavar=("W", "H"),
-                    default=[1.2, 0.8], help="field size in metres (default 1.2 0.8)")
+                    default=None,
+                    help="field size in metres (default: the size saved with the "
+                         "calibration, else 1.2 0.8)")
     ap.add_argument("--mode", choices=["wall", "floor"], default="floor",
                     help="floor is the physically meaningful one for a rolling "
                          "ball; wall is a free test harness for the airborne path, "
@@ -294,12 +297,12 @@ def main() -> None:
     if args.ball_radius is not None:
         color.radius_m = float(args.ball_radius)
 
-    field = Field(args.field[0], args.field[1])
     mode = args.mode
     # The measured field pose, if calibrate-field has produced one, else the
     # made-up rig. Same file and same rule as the tag tracker; --mode still
     # labels the plan view (top-down or head-on), which the pose file does not know.
     pose_path = Path(args.field_pose) if args.field_pose else field_pose_path()
+    field = resolve_field(args.field, None if args.synthetic_field else pose_path)
     using_calibrated = pose_path.exists() and not args.synthetic_field
     if using_calibrated:
         transform = ReferenceTagFieldTransform.load(

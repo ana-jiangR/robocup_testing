@@ -216,7 +216,9 @@ All positions are in **metres, field coordinates**, the same convention as
 every readout and plan view in this project (see the root README's
 Conventions section): origin at one field corner, `+X` along `width`, `+Y`
 along `height` — or at the custom origin picked in `calibrate-field`, if one
-is saved. `field.x0`/`field.y0` are where the first corner sits in these
+is saved. `field.width`/`field.height` are the calibrated size (saved by
+`calibrate-field`), so a reader can scale to the real field without being
+told it separately. `field.x0`/`field.y0` are where the first corner sits in these
 coordinates: `0, 0` by default, `-0.6, -0.4` with the origin at the centre of
 a 1.2 x 0.8 m field, so the rectangle is always `x0..x0+width`,
 `y0..y0+height`. Velocities are metres/second and angles degrees, `-180..180`.

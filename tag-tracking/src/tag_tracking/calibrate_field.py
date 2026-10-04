@@ -52,6 +52,7 @@ from vision_core.field import (
     ReferenceTagFieldTransform,
     SyntheticFieldTransform,
     field_pose_path,
+    resolve_field,
     saved_origin,
 )
 from vision_core.planview import draw_field
@@ -686,7 +687,9 @@ def _run_pick_origin(args, field: Field) -> None:
         finally:
             cap.release()
             cv2.destroyAllWindows()
-    transform.with_origin(origin).save(out)
+    transform = transform.with_origin(origin)
+    transform.field_size = (field.width, field.height)
+    transform.save(out)
     print(f"origin: {'first corner (default)' if origin is None else origin}")
     print(f"saved {out}")
 
@@ -704,8 +707,9 @@ def main() -> None:
              "single AprilTag, driven to each corner",
     )
     ap.add_argument(
-        "--field", type=float, nargs=2, metavar=("W", "H"), default=[1.2, 0.8],
-        help="field size in metres, used to build the default 4-corner layout",
+        "--field", type=float, nargs=2, metavar=("W", "H"), default=None,
+        help="field size in metres, used to build the default 4-corner layout and "
+             "saved with the pose (default: the size already saved, else 1.2 0.8)",
     )
     ap.add_argument(
         "--layout", nargs="+", metavar="ID:X,Y",
@@ -741,7 +745,11 @@ def main() -> None:
     )
     args = ap.parse_args()
 
-    field = Field(args.field[0], args.field[1])
+    # A re-run (or --pick-origin) defaults to the size already saved, so the
+    # field never silently snaps back to 1.2 x 0.8.
+    # --synthetic without --out saves nothing, so it has no file to default from.
+    field = resolve_field(args.field, None if (args.synthetic and not args.out)
+                          else (args.out or field_pose_path()))
     layout = parse_layout(args.layout) if args.layout else default_field_layout(field)
     if args.origin is not None and not (
         args.origin == ["center"] or len(args.origin) == 2
@@ -765,6 +773,8 @@ def main() -> None:
 
     if out:
         Path(out).parent.mkdir(parents=True, exist_ok=True)
+        # The size travels with the pose: every tracker reads it from here.
+        result.transform.field_size = (field.width, field.height)
         result.transform.save(out)
         print(f"\nsaved {out}")
     else:
