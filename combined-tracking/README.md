@@ -192,7 +192,7 @@ message:
   "timestamp": 1790437358.3149,
   "t_capture": 1790437358.2909,
   "t_publish": 1790437358.3149,
-  "field": { "width": 1.2, "height": 0.8 },
+  "field": { "width": 1.2, "height": 0.8, "x0": 0.0, "y0": 0.0 },
   "tags": [
     {
       "id": 4, "x": 0.612, "y": 0.388, "theta_deg": 19.98,
@@ -215,7 +215,11 @@ message:
 All positions are in **metres, field coordinates**, the same convention as
 every readout and plan view in this project (see the root README's
 Conventions section): origin at one field corner, `+X` along `width`, `+Y`
-along `height`. Velocities are metres/second and angles degrees, `-180..180`.
+along `height` — or at the custom origin picked in `calibrate-field`, if one
+is saved. `field.x0`/`field.y0` are where the first corner sits in these
+coordinates: `0, 0` by default, `-0.6, -0.4` with the origin at the centre of
+a 1.2 x 0.8 m field, so the rectangle is always `x0..x0+width`,
+`y0..y0+height`. Velocities are metres/second and angles degrees, `-180..180`.
 Every key above is always present; only `ball` can be `null`.
 
 **Frame identity and timing.** All times are `time.time()`, Unix epoch

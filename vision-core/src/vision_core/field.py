@@ -30,6 +30,12 @@ Field frame: origin at one corner of the rectangle, +X along `width`,
 +Y along `height`, +Z along the field's surface normal. Right-handed.
 A point at (0, 0) sits over the origin corner; (width, height) is the far corner.
 
+Custom origin (optional): calibrate-field can save an `origin` -- a point picked
+on the field, in the corner frame above -- next to the pose. When present,
+ReferenceTagFieldTransform.load() shifts the frame so that point reads (0, 0),
+and Field.relative_to() moves the rectangle to match. Axes keep their
+directions; only the zero moves. With no `origin` saved, nothing changes.
+
 theta, where a skill reports one, is a rotation about the field normal +Z, in
 degrees, measured from field +X, counter-clockwise positive.
 """
@@ -53,30 +59,46 @@ class Field:
 
     width: float = 1.2  # extent along field +X
     height: float = 0.8  # extent along field +Y
+    #: where the first corner sits in reported coords. (0, 0) unless a custom
+    #: origin moved the zero somewhere else -- see relative_to().
+    x0: float = 0.0
+    y0: float = 0.0
+
+    def relative_to(self, origin: tuple[float, float] | None) -> Field:
+        """The same rectangle, in a frame whose (0, 0) is `origin` (given in
+        corner coords). None leaves it as is."""
+        if origin is None:
+            return self
+        return Field(self.width, self.height, -float(origin[0]), -float(origin[1]))
 
     def corners(self) -> np.ndarray:
-        """The 4 corners in field coords, (4,3), starting at the origin corner."""
-        w, h = self.width, self.height
+        """The 4 corners in field coords, (4,3), starting at the first corner."""
+        x0, y0 = self.x0, self.y0
+        x1, y1 = x0 + self.width, y0 + self.height
         return np.array(
-            [[0.0, 0.0, 0.0], [w, 0.0, 0.0], [w, h, 0.0], [0.0, h, 0.0]],
+            [[x0, y0, 0.0], [x1, y0, 0.0], [x1, y1, 0.0], [x0, y1, 0.0]],
             dtype=np.float64,
         )
 
     def grid(self, step: float = 0.2) -> list[np.ndarray]:
-        """Interior grid lines as a list of (2,3) segments, for drawing."""
+        """Interior grid lines as a list of (2,3) segments, for drawing.
+        Spaced from the first corner, so they stay on the rectangle's edges."""
+        x0, y0 = self.x0, self.y0
+        x1, y1 = x0 + self.width, y0 + self.height
         segs: list[np.ndarray] = []
         for i in range(1, int(round(self.width / step))):
             gx = i * step
             if gx < self.width:
-                segs.append(np.array([[gx, 0, 0], [gx, self.height, 0]], np.float64))
+                segs.append(np.array([[x0 + gx, y0, 0], [x0 + gx, y1, 0]], np.float64))
         for i in range(1, int(round(self.height / step))):
             gy = i * step
             if gy < self.height:
-                segs.append(np.array([[0, gy, 0], [self.width, gy, 0]], np.float64))
+                segs.append(np.array([[x0, y0 + gy, 0], [x1, y0 + gy, 0]], np.float64))
         return segs
 
     def contains(self, x: float, y: float) -> bool:
-        return 0.0 <= x <= self.width and 0.0 <= y <= self.height
+        return (self.x0 <= x <= self.x0 + self.width
+                and self.y0 <= y <= self.y0 + self.height)
 
 
 # --------------------------------------------------------------------------
@@ -143,6 +165,24 @@ class CameraFieldTransform:
     def camera_origin_in_field(self) -> np.ndarray:
         """Where the camera sits, in field coords. For the top-down view."""
         return (-self.R.T @ self.t).reshape(3)
+
+    def pixel_to_field(
+        self, u: float, v: float, K: np.ndarray, dist: np.ndarray | None = None
+    ) -> np.ndarray | None:
+        """The field-plane (z = 0) point under pixel (u, v), or None if that
+        ray never reaches the plane in front of the camera."""
+        import cv2
+
+        d = np.zeros(5) if dist is None else dist
+        n = cv2.undistortPoints(np.array([[[u, v]]], np.float64), K, d).reshape(2)
+        ray = self.direction_to_field(np.array([n[0], n[1], 1.0]))[0]
+        cam = self.camera_origin_in_field()
+        if abs(ray[2]) < 1e-9:
+            return None
+        s = -cam[2] / ray[2]
+        if s <= 0:
+            return None
+        return cam + s * ray
 
 
 # --------------------------------------------------------------------------
@@ -273,6 +313,24 @@ class ReferenceTagFieldTransform(CameraFieldTransform):
 
     MIN_TAGS = 4
 
+    #: the custom origin, in corner coords, that R/t have been shifted to --
+    #: or None for the default (the first corner).
+    origin: tuple[float, float] | None = None
+
+    def with_origin(self, origin: tuple[float, float] | None) -> ReferenceTagFieldTransform:
+        """This pose re-expressed so `origin` (corner coords) reads (0, 0).
+        Axes keep their directions. None returns the default corner frame."""
+        t_corner = self.t
+        if self.origin is not None:
+            t_corner = self.t - self.R @ np.array([*self.origin, 0.0])
+        t = t_corner
+        if origin is not None:
+            origin = (float(origin[0]), float(origin[1]))
+            t = t_corner + self.R @ np.array([*origin, 0.0])
+        out = type(self)(self.R, t, self.source)
+        out.origin = origin
+        return out
+
     @classmethod
     def from_detections(
         cls,
@@ -340,14 +398,29 @@ class ReferenceTagFieldTransform(CameraFieldTransform):
         return cls(R, tvec.reshape(3), f"measured from {len(used)} reference tags")
 
     def save(self, path: str | Path) -> None:
-        Path(path).write_text(
-            json.dumps(
-                {"R": self.R.tolist(), "t": self.t.tolist(), "source": self.source},
-                indent=2,
-            )
-        )
+        """R/t are always written in the corner frame; a custom origin goes
+        alongside as `origin`, so dropping that key restores the default."""
+        corner = self.with_origin(None)
+        d = {"R": corner.R.tolist(), "t": corner.t.tolist(), "source": self.source}
+        if self.origin is not None:
+            d["origin"] = list(self.origin)
+        Path(path).write_text(json.dumps(d, indent=2))
 
     @classmethod
-    def load(cls, path: str | Path) -> ReferenceTagFieldTransform:
+    def load(cls, path: str | Path, use_origin: bool = True) -> ReferenceTagFieldTransform:
+        """With a saved `origin` (and `use_origin`), the result already reports
+        positions relative to it -- pair it with field.relative_to(t.origin)."""
         d = json.loads(Path(path).read_text())
-        return cls(np.array(d["R"]), np.array(d["t"]), d.get("source", str(path)))
+        t = cls(np.array(d["R"]), np.array(d["t"]), d.get("source", str(path)))
+        if use_origin and d.get("origin") is not None:
+            t = t.with_origin(tuple(d["origin"]))
+        return t
+
+
+def saved_origin(path: str | Path) -> tuple[float, float] | None:
+    """The custom origin stored in a field_pose.json, or None."""
+    p = Path(path)
+    if not p.exists():
+        return None
+    o = json.loads(p.read_text()).get("origin")
+    return None if o is None else (float(o[0]), float(o[1]))

@@ -63,6 +63,7 @@ uv run track-ball --ball-profile mine --cam-height 1.8  # match YOUR mounting he
 uv run track-ball --mode wall            # free test harness for the airborne path
 uv run track-ball --print-states         # stream x/y/z/vx/vy/grounded to stdout
 uv run track-ball --synthetic-field      # ignore a saved calib/field_pose.json
+uv run track-ball --corner-origin        # ignore a saved custom origin, report from the first corner
 uv run track-ball --list-cameras         # if it grabs the wrong one
 ```
 
@@ -81,7 +82,8 @@ Once the window is open, in this order:
 If `calib/field_pose.json` exists (from `uv run calibrate-field` in tag-tracking,
 with four reference tags on the field corners), it is loaded automatically and
 `--cam-height`/`--pitch` are ignored: the camera's position is then measured,
-not assumed. Until then the made-up rig below applies.
+not assumed. Until then the made-up rig below applies. If you picked a custom
+origin there, ball positions are reported relative to it too.
 
 Keys: `q` quit · `g` grid · `t` trails · `m` mask · `w` wall/floor · `p` pause ·
 `[` `]` nudge fx · `r` reset trail and track · `s` save intrinsics.

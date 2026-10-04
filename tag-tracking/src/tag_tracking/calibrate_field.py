@@ -6,6 +6,8 @@ reference AprilTags and solve where the field is, once.
     uv run calibrate-field --layout 0:0,0 1:1.2,0 2:1.2,0.8 3:0,0.8
     uv run calibrate-field --synthetic                        # self-test, no hardware
     uv run calibrate-field --sequential                       # one tag, moved to each corner in turn
+    uv run calibrate-field --origin 0.6 0.4                   # (0, 0) at that point instead of the corner
+    uv run calibrate-field --pick-origin                      # re-pick only, keep the saved pose
 
 Wraps ReferenceTagFieldTransform (vision_core.field) -- the geometry already
 lives there; from_detections() alone is a single noisy solvePnP call on
@@ -22,6 +24,12 @@ PnP problem:
         (e.g. mounted on a robot that drives there itself), camera fixed.
         Averages that one tag's pixel position at each corner, then solves
         once from the four averaged points.
+
+Calibrate first, origin second. After the pose is solved, a live view asks you
+to click where (0, 0) should be (snapping to corners/edge midpoints/centre),
+or press Enter to keep the first corner as before. The click needs the pose --
+that is what turns a pixel into a field point -- which is why it comes after.
+The choice is saved as `origin` next to R/t; every tracker picks it up.
 
 Saves to calib/field_pose.json, at the repo root (vision_core.paths), same as
 calib/intrinsics.json. track.py loads this automatically once it exists, in
@@ -44,7 +52,9 @@ from vision_core.field import (
     ReferenceTagFieldTransform,
     SyntheticFieldTransform,
     field_pose_path,
+    saved_origin,
 )
+from vision_core.planview import draw_field
 
 from .pose import tag_field_pose
 
@@ -388,6 +398,105 @@ def capture_sequential_corners(
     return results
 
 
+# --------------------------------------------------------------------------
+# Custom origin: where (0, 0) should be, picked after the pose is solved.
+# --------------------------------------------------------------------------
+
+#: a click this close (px) to a corner, edge midpoint or the centre lands on it.
+SNAP_PX = 18.0
+
+
+def _snap_points(field: Field) -> list[tuple[float, float]]:
+    w, h = field.width, field.height
+    return [(x, y) for x in (0.0, w / 2, w) for y in (0.0, h / 2, h)]
+
+
+def pick_origin(
+    read_bgr: Callable[[], np.ndarray],
+    transform: ReferenceTagFieldTransform,
+    field: Field,
+    K: np.ndarray,
+    dist: np.ndarray | None = None,
+    window_name: str = "calibrate-field: pick origin",
+    initial: tuple[float, float] | None = None,
+) -> tuple[float, float] | None:
+    """Click where field (0, 0) should be. Returns it in corner coords, or None
+    to keep the default (the first corner).
+
+    Click to place (snaps to corners, edge midpoints and the centre within
+    SNAP_PX), 'c' for the centre, Enter or 's' to accept, 'd' or Esc to keep
+    the default corner. Starts at `initial` (e.g. the previously saved
+    origin), so Enter alone keeps it.
+    """
+    corner = transform.with_origin(None)
+    snaps = _snap_points(field)
+    snap_px = {}
+    for sx, sy in snaps:
+        px, _ = cv2.projectPoints(np.array([[sx, sy, 0.0]]), *corner.rvec_tvec(), K,
+                                  np.zeros(5) if dist is None else dist)
+        snap_px[(sx, sy)] = px.reshape(2)
+    chosen: list[tuple[float, float] | None] = [initial]
+
+    def on_mouse(event, u, v, _flags, _param) -> None:
+        if event != cv2.EVENT_LBUTTONDOWN:
+            return
+        near = min(snaps, key=lambda q: np.linalg.norm(snap_px[q] - (u, v)))
+        if np.linalg.norm(snap_px[near] - (u, v)) < SNAP_PX:
+            chosen[0] = near
+            return
+        p = corner.pixel_to_field(u, v, K, dist)
+        if p is not None:
+            chosen[0] = (round(float(p[0]), 3), round(float(p[1]), 3))
+
+    cv2.namedWindow(window_name, cv2.WINDOW_AUTOSIZE)
+    cv2.setMouseCallback(window_name, on_mouse)
+    try:
+        while True:
+            disp = read_bgr().copy()
+            o = chosen[0]
+            shown = corner.with_origin(o)
+            draw_field(disp, field.relative_to(o), shown, K)
+            for q in snaps:
+                cv2.circle(disp, tuple(snap_px[q].astype(int)), 3, (200, 200, 200), -1)
+            cv2.rectangle(disp, (0, 0), (disp.shape[1], 84), (0, 0, 0), -1)
+            where = ("first corner (default)" if o is None
+                     else f"({o[0]:g}, {o[1]:g}) m from the first corner")
+            cv2.putText(disp, f"origin: {where}", (10, 28), cv2.FONT_HERSHEY_SIMPLEX,
+                        0.62, (0, 255, 0), 2, cv2.LINE_AA)
+            cv2.putText(disp, "click to place (snaps to corners/centre)   'c' centre   "
+                              "Enter accept   'd'/Esc keep default corner",
+                        (10, 56), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1,
+                        cv2.LINE_AA)
+            cv2.imshow(window_name, disp)
+            key = read_key()
+            if key in (27, ord("d")):
+                return None
+            if key == ord("c"):
+                chosen[0] = (field.width / 2, field.height / 2)
+            if key in (13, 10, ord("s")):
+                return chosen[0]
+    finally:
+        cv2.destroyWindow(window_name)
+
+
+def _choose_origin(args, read_bgr, transform, field, K, dist, out):
+    """The origin the user asked for, in corner coords, or None for the
+    default: --origin, else --no-origin, else the click picker on a live
+    camera. With no camera (synthetic) it keeps whatever `out` already has."""
+    if args.origin is not None:
+        o = (field.width / 2, field.height / 2) if args.origin == ["center"] else (
+            float(args.origin[0]), float(args.origin[1]))
+        return o
+    if args.no_origin:
+        return None
+    if read_bgr is None:
+        return saved_origin(out) if out else None
+    print("\nnow pick the origin: click where (0, 0) should be, Enter to accept, "
+          "'d' to keep the first corner.")
+    return pick_origin(read_bgr, transform, field, K, dist,
+                       initial=saved_origin(out) if out else None)
+
+
 def _run_synthetic(args, field: Field, layout: dict[int, tuple[float, float]]):
     from vision_core.intrinsics import from_fov
 
@@ -428,6 +537,8 @@ def _run_synthetic(args, field: Field, layout: dict[int, tuple[float, float]]):
             f"moving tag readback: x={pose.x:.3f} y={pose.y:.3f} th={pose.theta_deg:+.1f}  "
             f"(placed at x={moving_truth[0]:.3f} y={moving_truth[1]:.3f} th={moving_truth[2]:+.1f})"
         )
+    origin = _choose_origin(args, None, result.transform, field, K, None, args.out)
+    result.transform = result.transform.with_origin(origin)
     return result, args.out
 
 
@@ -470,23 +581,25 @@ def _run_live(args, field: Field, layout: dict[int, tuple[float, float]]):
     print(f"hold the camera steady on the field; capturing until {args.min_frames}+ good frames")
     print("'q' to finish once enough are captured, Esc to abort.\n")
 
+    out = args.out or str(field_pose_path())
     try:
         frames = capture_reference_frames(
             _read_bgr, layout, args.min_frames, MAX_LIVE_FRAMES, "calibrate-field"
         )
+        result = calibrate_field(frames, layout, K, dist, min_frames=args.min_frames,
+                                 tag_size=args.tag_size)
+        print(f"\n{result.transform.source}")
+        print(
+            f"agreement across frames: rotation spread {result.rotation_spread_deg:.3f} deg, "
+            f"translation spread {result.translation_spread_m * 1000:.2f} mm"
+        )
+        result.transform.source += f" ({lens_note})"
+        origin = _choose_origin(args, _read_bgr, result.transform, field, K, dist, out)
+        result.transform = result.transform.with_origin(origin)
     finally:
         cap.release()
         cv2.destroyAllWindows()
-
-    result = calibrate_field(frames, layout, K, dist, min_frames=args.min_frames,
-                             tag_size=args.tag_size)
-    print(f"\n{result.transform.source}")
-    print(
-        f"agreement across frames: rotation spread {result.rotation_spread_deg:.3f} deg, "
-        f"translation spread {result.translation_spread_m * 1000:.2f} mm"
-    )
-    result.transform.source += f" ({lens_note})"
-    return result, (args.out or str(field_pose_path()))
+    return result, out
 
 
 def _run_synthetic_sequential(args, field: Field, layout: dict[int, tuple[float, float]]):
@@ -526,6 +639,8 @@ def _run_synthetic_sequential(args, field: Field, layout: dict[int, tuple[float,
     dR = _rotation_angle_deg(result.transform.R.T @ truth.R)
     dt = float(np.linalg.norm(result.transform.t - truth.t))
     print(f"vs ground truth: rotation off {dR:.2f} deg, origin off {dt * 1000:.1f} mm")
+    origin = _choose_origin(args, None, result.transform, field, K, None, args.out)
+    result.transform = result.transform.with_origin(origin)
     return result, args.out
 
 
@@ -535,20 +650,45 @@ def _run_live_sequential(args, field: Field, layout: dict[int, tuple[float, floa
     print("camera stays fixed. At each position: hold the tag steady, then")
     print("'q' confirms and moves to the next corner ('r' retries this one), Esc aborts.\n")
 
+    out = args.out or str(field_pose_path())
     try:
         averaged = capture_sequential_corners(
             _read_bgr, layout, args.frames_per_corner, "calibrate-field (one tag)"
         )
+        result = solve_sequential(averaged, layout, K, dist, tag_size=args.tag_size)
+        print(f"\n{result.transform.source}")
+        print(f"reprojection error: {result.reproj_error_px:.3f} px rms, "
+              f"{result.max_reproj_error_px:.3f} px max")
+        result.transform.source += f" ({lens_note})"
+        origin = _choose_origin(args, _read_bgr, result.transform, field, K, dist, out)
+        result.transform = result.transform.with_origin(origin)
     finally:
         cap.release()
         cv2.destroyAllWindows()
+    return result, out
 
-    result = solve_sequential(averaged, layout, K, dist, tag_size=args.tag_size)
-    print(f"\n{result.transform.source}")
-    print(f"reprojection error: {result.reproj_error_px:.3f} px rms, "
-          f"{result.max_reproj_error_px:.3f} px max")
-    result.transform.source += f" ({lens_note})"
-    return result, (args.out or str(field_pose_path()))
+
+def _run_pick_origin(args, field: Field) -> None:
+    """--pick-origin: keep the saved pose, change only where (0, 0) is."""
+    out = args.out or str(field_pose_path())
+    if not Path(out).exists():
+        raise SystemExit(f"no saved field pose at {out} -- calibrate first, then pick the origin")
+    transform = ReferenceTagFieldTransform.load(out, use_origin=False)
+    print(f"loaded {out} ({transform.source})")
+    old = saved_origin(out)
+    print(f"current origin: {'first corner (default)' if old is None else old}")
+    if args.origin is not None or args.no_origin:
+        origin = _choose_origin(args, None, transform, field, None, None, None)
+    else:
+        cap, _read_bgr, K, dist, _ = _open_live(args)
+        try:
+            origin = _choose_origin(args, _read_bgr, transform, field, K, dist, out)
+        finally:
+            cap.release()
+            cv2.destroyAllWindows()
+    transform.with_origin(origin).save(out)
+    print(f"origin: {'first corner (default)' if origin is None else origin}")
+    print(f"saved {out}")
 
 
 def main() -> None:
@@ -572,6 +712,19 @@ def main() -> None:
         help="override the default corners, e.g. 0:0,0 1:1.2,0 2:1.2,0.8 3:0,0.8 "
              "(--sequential: visited in this order; the ids are just labels)",
     )
+    ap.add_argument(
+        "--origin", nargs="+", metavar="X Y",
+        help="put field (0, 0) here instead of the first corner, in metres from "
+             "that corner (or 'center'); skips the click picker",
+    )
+    ap.add_argument(
+        "--no-origin", action="store_true",
+        help="skip the origin picker and keep the first corner as (0, 0)",
+    )
+    ap.add_argument(
+        "--pick-origin", action="store_true",
+        help="don't recalibrate: load the saved pose and only (re)pick the origin",
+    )
     ap.add_argument("--tag-size", type=float, default=0.080)
     ap.add_argument("--camera", type=int, default=0)
     ap.add_argument("--width", type=int, default=1280)
@@ -590,6 +743,14 @@ def main() -> None:
 
     field = Field(args.field[0], args.field[1])
     layout = parse_layout(args.layout) if args.layout else default_field_layout(field)
+    if args.origin is not None and not (
+        args.origin == ["center"] or len(args.origin) == 2
+    ):
+        ap.error("--origin takes X Y (metres) or 'center'")
+
+    if args.pick_origin:
+        _run_pick_origin(args, field)
+        return
 
     if args.synthetic:
         result, out = (

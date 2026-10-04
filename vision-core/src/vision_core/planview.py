@@ -5,7 +5,8 @@ panel beside it, owning the scaling and the furniture while each skill draws its
 own marks through `to_px`. Shared for the same reason field.py is -- both skills
 draw the identical rectangle, and two copies would drift apart.
 
-Axes: +X right, +Y up, origin at the rectangle's bottom-left. In floor mode that
+Axes: +X right, +Y up, origin at the rectangle's bottom-left (or wherever a
+custom origin put it -- see Field.relative_to). In floor mode that
 really is a top-down view; in wall mode it is head-on. Same axes either way.
 """
 
@@ -68,8 +69,9 @@ class PlanView:
         # bounds is still drawn somewhere visible instead of clipped off the panel.
         self.scale = 0.86 * min(usable_w / field.width, usable_h / field.height)
         fw, fh = field.width * self.scale, field.height * self.scale
-        self._ox = pad + (usable_w - fw) / 2.0  # origin pixel: bottom-left of rect
-        self._oy = top + (usable_h - fh) / 2.0 + fh
+        # Pixel of the rectangle's bottom-left corner, which is (x0, y0) in field coords.
+        self._ox = pad + (usable_w - fw) / 2.0 - field.x0 * self.scale
+        self._oy = top + (usable_h - fh) / 2.0 + fh + field.y0 * self.scale
 
     # -- coordinates -------------------------------------------------------
 
@@ -102,8 +104,9 @@ class PlanView:
         for seg in self.field.grid(0.2):
             cv2.line(panel, self.to_px(*seg[0][:2]), self.to_px(*seg[1][:2]),
                      GRID_COLOR, 1)
-        cv2.rectangle(panel, self.to_px(0, 0),
-                      self.to_px(self.field.width, self.field.height),
+        f = self.field
+        cv2.rectangle(panel, self.to_px(f.x0, f.y0),
+                      self.to_px(f.x0 + f.width, f.y0 + f.height),
                       FIELD_COLOR, 1, cv2.LINE_AA)
 
         o = self.to_px(0, 0)
@@ -201,7 +204,10 @@ def draw_field(
     if ok.all():
         cv2.polylines(frame, [corners.astype(np.int32)], True, FIELD_COLOR, 2,
                       cv2.LINE_AA)
-        for i, name in enumerate(["(0,0)", "(W,0)", "(W,H)", "(0,H)"]):
+        names = ["(0,0)", "(W,0)", "(W,H)", "(0,H)"]
+        if field.x0 or field.y0:  # custom origin: say where each corner really is
+            names = [f"({c[0]:+.2f},{c[1]:+.2f})" for c in field.corners()]
+        for i, name in enumerate(names):
             p = corners[i].astype(int)
             cv2.circle(frame, tuple(p), 4, FIELD_COLOR, -1, cv2.LINE_AA)
             cv2.putText(frame, name, (p[0] + 6, p[1] - 6), _FONT, 0.45, FIELD_COLOR,
@@ -210,7 +216,7 @@ def draw_field(
         cv2.putText(frame, "field partly behind camera", (12, 52), _FONT, 0.6,
                     OUT_COLOR, 2, cv2.LINE_AA)
 
-    # Field axes at the origin corner: X red, Y green (0.2 m each).
+    # Field axes at the origin: X red, Y green (0.2 m each).
     axes = np.array([[0, 0, 0], [0.2, 0, 0], [0, 0.2, 0]], np.float64)
     px, ok = project(axes, transform, K)
     if ok.all():

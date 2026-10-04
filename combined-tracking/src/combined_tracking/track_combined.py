@@ -280,7 +280,8 @@ def build_state_doc(
         "timestamp": t_publish,
         "t_capture": t_capture,
         "t_publish": t_publish,
-        "field": {"width": field.width, "height": field.height},
+        "field": {"width": field.width, "height": field.height,
+                  "x0": field.x0, "y0": field.y0},
         "tags": [tag_state_to_dict(s, tag_max_coast_s) for s in tag_states],
         "ball": None if ball_state is None else ball_state_to_dict(ball_state, field),
         "stats": {**stats, "latency_ms": (t_publish - t_capture) * 1000.0},
@@ -608,6 +609,9 @@ def main() -> None:
     ap.add_argument("--field-pose", type=str, default=None,
                     help="measured field pose to load (default calib/field_pose.json "
                          "at the repo root, written by calibrate-field)")
+    ap.add_argument("--corner-origin", action="store_true",
+                    help="ignore any custom origin saved by calibrate-field and report "
+                         "positions from the first field corner, as before")
     ap.add_argument("--synthetic-field", action="store_true",
                     help="use the made-up field from --cam-height/--pitch even if a "
                          "measured one is saved")
@@ -683,10 +687,17 @@ def main() -> None:
     pose_path = Path(args.field_pose) if args.field_pose else field_pose_path()
     using_calibrated = pose_path.exists() and not args.synthetic_field
     if using_calibrated:
-        transform = ReferenceTagFieldTransform.load(pose_path)
+        transform = ReferenceTagFieldTransform.load(
+            pose_path, use_origin=not args.corner_origin)
         print(f"loaded calibrated field pose from {pose_path}")
     else:
         transform = build_transform(args, field, mode)
+    if getattr(transform, "origin", None) is not None:
+        field = field.relative_to(transform.origin)
+        print(f"custom origin: (0, 0) is ({transform.origin[0]:g}, {transform.origin[1]:g}) m "
+              f"from the first corner (--corner-origin to ignore)")
+        # On screen too, so a custom zero is never a surprise.
+        transform.source += f", origin ({transform.origin[0]:g}, {transform.origin[1]:g})"
 
     # A one-frame driver queue, so a frame is never older than the one the
     # camera took last. Where the backend ignores it, LatestFrameGrabber below

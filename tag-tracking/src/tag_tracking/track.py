@@ -55,6 +55,7 @@ from .calibrate_field import (
     capture_sequential_corners,
     default_field_layout,
     field_pose_path,
+    saved_origin,
     solve_sequential,
 )
 from .filter import SPEED_EPS, TagFieldState, TagTracker
@@ -265,6 +266,9 @@ def main() -> None:
                          "(default calib/field_pose.json at the repo root -- see calibrate-field)")
     ap.add_argument("--synthetic-field", action="store_true",
                     help="use the made-up field even if a calibrated one is saved")
+    ap.add_argument("--corner-origin", action="store_true",
+                    help="ignore any custom origin saved by calibrate-field and report "
+                         "positions from the first field corner, as before")
     ap.add_argument("--synthetic-camera", action="store_true",
                     help="no webcam: track an animated tag on a simulated field instead, "
                          "calibrating live from simulated reference tags")
@@ -381,17 +385,30 @@ def main() -> None:
 
             out_path = Path(args.field_pose) if args.field_pose else field_pose_path()
             out_path.parent.mkdir(parents=True, exist_ok=True)
+            # A custom origin is a point on the field, not on the camera, so it
+            # survives re-solving the pose: carry it over into the new file.
+            transform = transform.with_origin(saved_origin(out_path))
             transform.save(out_path)
             print(f"saved {out_path}\n")
+            if args.corner_origin:
+                transform = transform.with_origin(None)
         else:
             out_path = Path(args.field_pose) if args.field_pose else field_pose_path()
             using_calibrated = out_path.exists() and not args.synthetic_field
             if using_calibrated:
-                transform = ReferenceTagFieldTransform.load(out_path)
+                transform = ReferenceTagFieldTransform.load(
+                    out_path, use_origin=not args.corner_origin)
                 calibrated_note = f"loaded from {out_path}"
                 print(f"loaded calibrated field pose from {out_path}")
             else:
                 transform = build_transform(args, field, mode)
+
+    if getattr(transform, "origin", None) is not None:
+        field = field.relative_to(transform.origin)
+        print(f"custom origin: (0, 0) is ({transform.origin[0]:g}, {transform.origin[1]:g}) m "
+              f"from the first corner (--corner-origin to ignore)")
+        # On screen too, so a custom zero is never a surprise.
+        transform.source += f", origin ({transform.origin[0]:g}, {transform.origin[1]:g})"
 
     detector = pa.Detector(families="tag36h11", nthreads=4, quad_decimate=1.0,
                            decode_sharpening=0.25)

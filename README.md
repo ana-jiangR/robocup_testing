@@ -90,6 +90,7 @@ standalone.
 | `uv run calibrate-camera` | Measures the lens: wave a printed board at the webcam | `calib/intrinsics.json` |
 | `uv run calibrate-field` | Measures the field position: point the webcam at your 4 tags | `calib/field_pose.json` |
 | `uv run calibrate-field --sequential` | Same, but one tag moved to each corner in turn (camera fixed) instead of 4 at once | `calib/field_pose.json` |
+| `uv run calibrate-field --pick-origin` | Re-pick where `(0,0)` is — click it on the live view — without recalibrating | `calib/field_pose.json` |
 | `uv run calibrate-ball` | Measures the ball's color: drag a box over it | `calib/ball_color.json` |
 | `uv run track --calibrate-live` | Lens + field in one session, then starts tracking | `calib/field_pose.json` |
 | `uv run track --calibrate-live --sequential` | Same, one tag moved to each corner instead of 4 at once | `calib/field_pose.json` |
@@ -144,6 +145,9 @@ against the wrong physical size until you correct it.
 | `--layout ID:X,Y ...` | Custom reference-tag positions, overrides the default 4 corners | corners of `--field` | `calibrate-field` |
 | `--sequential` | One tag moved to each corner in turn (camera fixed), instead of 4 tags at once | off | `calibrate-field`, `track --calibrate-live` |
 | `--frames-per-corner` | Samples to average at each corner | `15` | `calibrate-field --sequential`, `track --calibrate-live --sequential` |
+| `--origin X Y` / `--origin center` | Put `(0,0)` here instead of the first corner, metres from that corner — skips the click picker | ask by click | `calibrate-field` |
+| `--no-origin` | Skip the origin picker, keep the first corner as `(0,0)` | off | `calibrate-field` |
+| `--corner-origin` | Ignore a saved custom origin for this run, report from the first corner | off | `track`, `track-ball`, `track-combined` |
 | `--tag-id` / `--size-mm` | Which tag id, and initial size in mm on the phone page | `0` / `80` | `serve-tag` |
 | `--ball-profile` | Which named color profile to track | `test` | `track-ball`, `track-combined` |
 | `--radius-mm` | The ball's real **radius**, stored in the profile | `20` | `calibrate-ball` |
@@ -217,7 +221,10 @@ fresh and may get slightly different ones.
 
 **Field frame**: origin at one corner, +X along `width`, +Y along `height`,
 +Z along the surface normal. Right-handed. `(0,0)` is the origin corner and
-`(width, height)` the far one.
+`(width, height)` the far one — unless you picked a **custom origin** in
+`calibrate-field`, in which case `(0,0)` is that point instead. The axes keep
+their directions; only the zero moves, and the window header says
+`origin (x, y)` whenever one is in use.
 
 **`--mode wall|floor`**: whether the virtual field stands up facing the camera or
 lies flat. `floor` is the physically meaningful one and assumes the camera is

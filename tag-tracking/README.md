@@ -236,6 +236,8 @@ skill, not vision-core, because it needs pupil_apriltags to see the tags at all.
 uv run calibrate-field --synthetic                        # try it first: a digital field, no hardware needed
 uv run calibrate-field --field 1.2 0.8                    # your real field's size, tags at ids 0-3 on the corners
 uv run calibrate-field --layout 0:0,0 1:1.2,0 2:1.2,0.8 3:0,0.8  # or name ids/positions explicitly
+uv run calibrate-field --origin center                    # (0,0) at the field centre, no picker
+uv run calibrate-field --pick-origin                      # change only the origin, keep the saved pose
 ```
 
 Hold the camera steady on the field; it captures frames until all four
@@ -243,6 +245,30 @@ reference tags have been seen 10+ times, then reports rotation/translation
 spread across those frames — a small spread means the solve is stable, a large
 one means something is loose or a tag ID is ambiguous. Saves to
 `calib/field_pose.json`.
+
+#### Choosing where `(0,0)` is
+
+Right after the solve — same run, camera still open — a second window asks
+where the origin should be. The field is drawn over the live picture:
+
+- **click** a spot on the field — it snaps to a corner, edge midpoint or the
+  centre if you click within a few pixels of one (grey dots)
+- **`c`** puts it at the centre
+- **Enter** accepts what's shown
+- **`d`** or **Esc** keeps the first corner, exactly as before
+
+The red/green axes jump to wherever you click, so what you see is what every
+tracker will report. Calibration comes first because a click is only a
+position once the field pose is known. The origin is saved as `"origin"`
+next to the pose in `calib/field_pose.json`; `track`, `track-ball` and
+`track-combined` all pick it up, shift the rectangle, in/out test and plan
+view to match, and show `origin (x, y)` in the window header. Leave it out
+and nothing changes.
+
+To change it later without recalibrating: `uv run calibrate-field
+--pick-origin`. To ignore it for one run: `--corner-origin` on any tracker.
+Re-running calibration (here or `track --calibrate-live`) keeps a saved origin
+unless you pick a new one — it's a point on the field, not on the camera.
 
 > **Cheapest real-hardware test: paper, no printer calibration needed.**
 > Print (or `uv run serve-tag --save-png`) 4 same-size AprilTags, or use
@@ -337,6 +363,9 @@ made-up field for a demo without disturbing the saved calibration, or
 `--field-pose PATH` to point at a different saved pose (e.g. one solved for a
 second camera).
 
+A custom origin from `calibrate-field` is picked up the same way; pass
+`--corner-origin` to report from the first corner instead for one run.
+
 Both `--synthetic` modes never overwrite your real calibration: they only save
 if you also pass `--out`.
 
@@ -380,7 +409,8 @@ will not usually write this by hand.
 
 **Field frame**: origin at one corner, +X along `width`, +Y along `height`,
 +Z along the surface normal. Right-handed. `(0,0)` is the origin corner and
-`(width, height)` the far one.
+`(width, height)` the far one — or, with a custom origin saved by
+`calibrate-field`, `(0,0)` is that point and the axes keep their directions.
 
 **theta**: rotation about the field normal, degrees in `(-180, 180]`, measured
 from field +X, counter-clockwise positive, **0 when the tag is upright**. Use
