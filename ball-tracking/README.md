@@ -217,6 +217,28 @@ velocity, and the error looks like drift rather than a bug.
 > measurements while the filter coasts on a confident, stale estimate. The
 > docstrings in [`ball.py`](src/ball_tracking/ball.py) explain why.
 
+**7 · Several tracks, one answer.** After the multi-hypothesis ball filter (MHKF,
+[`Camera::update_balls_mhkf`](https://github.com/RoboJackets/robocup-software/blob/ros2/src/rj_vision_filter/src/camera/camera.cpp))
+in Georgia Tech RoboJackets'
+[rj_vision_filter](https://github.com/RoboJackets/robocup-software/tree/ros2/src/rj_vision_filter)
+(Apache-2.0; the idea is theirs, no code was copied). With one filter, a same-colored blob that wins a single frame becomes
+the track, the prediction bonus keeps picking it, and the real ball is gated out
+until it times out — a decoy seen first was never let go. Now up to 4 tracks run
+side by side, one filter each:
+
+- Each track claims at most one of the top 6 blobs, nearest first, and only inside
+  its **reach circle**: `ball_max_speed` (6.5 m/s, the [SSL kick cap](https://robocup-ssl.github.io/ssl-rules/sslrules.html#_ball_speed)) times the time since it last saw
+  the ball, plus 5 cm, converted to pixels at its predicted depth.
+- Leftover blobs start tracks of their own. A track dies when it reaches `lost`.
+- Health is a leaky hit counter (+2 per hit, −1 per miss, max 20). The output is
+  the track that is **on the field** (10 cm margin, `z` ≤ 1 m), then the
+  healthiest. A newcomer needs 2 hits to be output unless it is alone, and it must
+  beat the current output by 6 to take over, so two good tracks don't flicker.
+
+In a synthetic check, an off-field decoy 2.5× the ball's size went from 1% of
+frames within 5 cm of the truth (locked on the decoy) to 97%. Clean runs are
+unchanged.
+
 ## Honest limits
 
 **Radius-based height is weak** — for a 40 mm ball on 720p at 60° HFOV, about
@@ -228,7 +250,9 @@ camera.
 
 - `BallFieldState` exposes `vx`/`vy` but not `vz`, by design — in-plane velocity
   is the part you can trust. `vz` is in the filter state if you need it.
-- One ball only. Two of the same color will fight.
+- One ball only. A same-colored object *off* the field is outvoted (step 7); one
+  lying still *on* the field looks exactly like a resting ball, and whichever was
+  tracked first keeps winning. Keep the field clear of the ball's color.
 - `--mode wall` is not physical for a rolling ball, but a hand-held ball is
   off-plane nearly always, so the airborne path runs constantly at your desk.
 
@@ -274,7 +298,7 @@ within seconds.
 ```
 src/ball_tracking/
   ball_color.py   named profiles, the mask, and the calibration tool
-  ball.py         detector, ray/plane geometry, the ball's Kalman filter
+  ball.py         detector, ray/plane geometry, the ball's Kalman filters and tracks
   track_ball.py   live tracking, mask overlay, plan view
 ```
 
