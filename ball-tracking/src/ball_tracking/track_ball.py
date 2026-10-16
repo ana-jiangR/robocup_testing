@@ -341,7 +341,7 @@ def main() -> None:
             K, dist, intr_source = intr.load(w, h)
 
         tracker = BallTracker(color, transform, K, dist, sigma_px=args.sigma_px,
-                              sigma_a=args.sigma_a, sigma_a_air=args.sigma_a_air)
+                              sigma_a=args.sigma_a, sigma_a_air=args.sigma_a_air, field=field)
         plan = PlanView(field, height=h, mode=mode)
         trail: deque = deque(maxlen=TRAIL_LEN)
 
@@ -420,7 +420,7 @@ def main() -> None:
                 # BallTracker has no reset(); rebuilding it is the reset. A
                 # stale track is usually what 'r' is pressed to get rid of.
                 tracker = BallTracker(color, transform, K, dist, sigma_px=args.sigma_px,
-                                      sigma_a=args.sigma_a, sigma_a_air=args.sigma_a_air)
+                                      sigma_a=args.sigma_a, sigma_a_air=args.sigma_a_air, field=field)
                 state = None
             elif key in (ord("["), ord("]")):
                 K = K.copy()
@@ -428,7 +428,7 @@ def main() -> None:
                 K[1, 1] = K[0, 0]
                 intr_source = "hand-tuned"
                 tracker = BallTracker(color, transform, K, dist, sigma_px=args.sigma_px,
-                                      sigma_a=args.sigma_a, sigma_a_air=args.sigma_a_air)
+                                      sigma_a=args.sigma_a, sigma_a_air=args.sigma_a_air, field=field)
                 trail.clear()
                 print(f"fx {K[0, 0]:.1f}  -> {intr.hfov_of(K, w):.1f} deg HFOV")
             elif key == ord("w") and using_calibrated:
@@ -439,7 +439,7 @@ def main() -> None:
                 transform = build_transform(args, field, mode)
                 plan = PlanView(field, height=h, mode=mode)
                 tracker = BallTracker(color, transform, K, dist, sigma_px=args.sigma_px,
-                                      sigma_a=args.sigma_a, sigma_a_air=args.sigma_a_air)
+                                      sigma_a=args.sigma_a, sigma_a_air=args.sigma_a_air, field=field)
                 trail.clear()
                 print(f"transform: {transform.source}")
             elif key == ord("s"):

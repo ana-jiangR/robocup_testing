@@ -155,10 +155,17 @@ class BallDetector:
         prediction is wrong exactly when the ball does something unexpected,
         which is the moment you least want the detector to go blind.
         """
-        cands = self.candidates(mask)
-        if not cands:
-            return None
+        ranked = self.ranked(mask, predicted_px, predicted_radius_px)
+        return ranked[0] if ranked else None
 
+    def ranked(
+        self,
+        mask: np.ndarray,
+        predicted_px: tuple[float, float] | None = None,
+        predicted_radius_px: float | None = None,
+    ) -> list[BallBlob]:
+        """Every candidate, scored as in best(), highest first."""
+        cands = self.candidates(mask)
         scored: list[BallBlob] = []
         for c in cands:
             # A ball is round: circularity and fill both say so, from different
@@ -176,7 +183,7 @@ class BallDetector:
             scored.append(
                 BallBlob(c.u, c.v, c.radius_px, c.area_px, c.circularity, c.fill, score)
             )
-        return max(scored, key=lambda b: b.score)
+        return sorted(scored, key=lambda b: b.score, reverse=True)
 
 
 # --------------------------------------------------------------------------
@@ -503,9 +510,48 @@ class BallObservation:
     air_cov: np.ndarray | None  # 3x3 field-frame covariance of air_point
 
 
+@dataclass(eq=False)
+class _Hypothesis:
+    """One candidate ball track: its own filter and its own airborne trigger.
+
+    The trigger is per track because it is a memory of *this* ball's recent
+    measurements; a second blob must not vote a first one into the air.
+    """
+
+    filter: BallFilter
+    health: int = 0
+    air_votes: int = 0
+    airborne: bool = False
+    hit: bool = False  # took a measurement this frame
+    blob: BallBlob | None = None
+    obs: BallObservation | None = None
+
+
 class BallTracker:
     """Frame in, BallFieldState out. The only thing a caller must get right is
-    handing over a measured dt."""
+    handing over a measured dt.
+
+    Several tracks at once, after the multi-hypothesis ball filter (MHKF) in
+    RoboJackets' rj_vision_filter: Camera::update_balls_mhkf in
+    https://github.com/RoboJackets/robocup-software/blob/ros2/src/rj_vision_filter/src/camera/camera.cpp
+    (Apache-2.0). The idea is theirs; no code was copied. With a
+    single filter, a false positive that wins one frame becomes the track; the
+    detector's prediction bonus then keeps choosing it, and the real ball is
+    gated out until the false track times out. Here each blob is matched to
+    the track whose reach circle it falls in (no faster than ball_max_speed
+    since that track last saw it), leftovers start tracks of their own, and the
+    output is the confirmed track that is on the field, healthiest first.
+    """
+
+    #: Health is a hit counter that leaks: +HEALTH_INC per accepted frame, -1
+    #: per frame without one. A track must reach CONFIRM to be output unless it
+    #: is the only one, and a rival must beat the current output by SWITCH to
+    #: take over, so two good tracks do not flicker.
+    HEALTH_INC = 2
+    HEALTH_MAX = 20
+    CONFIRM = 4
+    SWITCH = 6
+    REACH_MARGIN = 0.05  # metres on top of max speed: detection jitter
 
     def __init__(
         self,
@@ -519,6 +565,12 @@ class BallTracker:
         air_sigmas: float = 1.5,
         air_min_margin: float = 0.04,
         air_hold: int = 2,
+        field: Field | None = None,
+        max_tracks: int = 4,
+        max_candidates: int = 6,
+        ball_max_speed: float = 6.5,
+        field_margin: float = 0.10,
+        max_z: float = 1.0,
     ) -> None:
         self.color = color
         self.detector = BallDetector(color)
@@ -528,24 +580,55 @@ class BallTracker:
         self.fx = float(self.K[0, 0])
         self.radius_m = float(color.radius_m)
         self.sigma_px = float(sigma_px)
-        self.filter = BallFilter(sigma_a=sigma_a, sigma_a_air=sigma_a_air)
+        self.sigma_a = float(sigma_a)
+        self.sigma_a_air = float(sigma_a_air)
         #: Sigmas of depth disagreement needed to *enter* the airborne state,
         #: with a floor under it so a very close ball is not called airborne on
         #: millimetres. Leaving again needs only 0.4 of this -- see observe().
         self.air_sigmas = float(air_sigmas)
         self.air_min_margin = float(air_min_margin)
         self.air_hold = int(air_hold)
-        self._air_votes = 0
-        self._airborne = False
+
+        #: Where a ball can plausibly be. None makes every track plausible, and
+        #: the output is simply the healthiest.
+        self.field = field
+        self.field_margin = float(field_margin)
+        self.max_z = float(max_z)
+        self.max_tracks = int(max_tracks)
+        self.max_candidates = int(max_candidates)
+        #: m/s. The reach circle: a track only claims a blob it could have got
+        #: to since it last saw the ball. A kick can set any velocity at any
+        #: instant, so this is the fastest a ball can go: 6.5 m/s, the SSL kick
+        #: cap (rules 8.4.2 "Ball Speed",
+        #: https://robocup-ssl.github.io/ssl-rules/sslrules.html#_ball_speed),
+        #: which robocup's sim (MAX_BALL_SPEED) also enforces.
+        self.ball_max_speed = float(ball_max_speed)
+
+        self.tracks: list[_Hypothesis] = []
+        self._out: _Hypothesis | None = None
+        self._blank = self._new_filter()
 
         self.last_mask: np.ndarray | None = None
         self.last_blob: BallBlob | None = None
         self.last_obs: BallObservation | None = None
 
+    def _new_filter(self) -> BallFilter:
+        return BallFilter(sigma_a=self.sigma_a, sigma_a_air=self.sigma_a_air)
+
+    @property
+    def filter(self) -> BallFilter:
+        """The output track's filter (an empty one before the ball is seen)."""
+        return self._out.filter if self._out is not None else self._blank
+
     # -- geometry ----------------------------------------------------------
 
-    def observe(self, blob: BallBlob) -> BallObservation:
-        """Turn one blob into both range estimates, and decide which to believe."""
+    def observe(self, blob: BallBlob, track: _Hypothesis | None = None) -> BallObservation:
+        """Turn one blob into both range estimates, and decide which to believe.
+
+        `track` holds the airborne trigger this blob votes in; by default the
+        output track's.
+        """
+        h = track if track is not None else (self._out or _Hypothesis(self._blank))
         d_cam = ray_direction(blob.u, blob.v, self.K, self.dist)
 
         hit = plane_intersection(d_cam, self.transform, self.radius_m)
@@ -570,21 +653,21 @@ class BallTracker:
         enter = max(self.air_sigmas * sigma_z, self.air_min_margin)
         exit_ = 0.4 * enter
         if np.isfinite(ground_depth) and np.isfinite(radius_depth):
-            disagrees = gap > (exit_ if self._airborne else enter)
+            disagrees = gap > (exit_ if h.airborne else enter)
         else:
             disagrees = False
-        self._air_votes = (
-            min(self._air_votes + 1, self.air_hold)
+        h.air_votes = (
+            min(h.air_votes + 1, self.air_hold)
             if disagrees
-            else max(self._air_votes - 1, 0)
+            else max(h.air_votes - 1, 0)
         )
         # Rising edge needs the full hold; falling edge only needs the votes to
         # run out, so landing is noticed promptly.
-        if self._air_votes >= self.air_hold:
-            self._airborne = True
-        elif self._air_votes == 0:
-            self._airborne = False
-        airborne = self._airborne
+        if h.air_votes >= self.air_hold:
+            h.airborne = True
+        elif h.air_votes == 0:
+            h.airborne = False
+        airborne = h.airborne
 
         air_point = (
             point_at_depth(d_cam, radius_depth, self.transform)
@@ -620,16 +703,71 @@ class BallTracker:
 
     # -- prediction, in pixels, for the detector ---------------------------
 
-    def predicted_pixel(self) -> tuple[tuple[float, float], float] | None:
-        """Where the filter thinks the ball will appear, and how big. Or None."""
-        if not self.filter.initialised or self.filter.lost():
+    def predicted_pixel(
+        self, track: _Hypothesis | None = None
+    ) -> tuple[tuple[float, float], float] | None:
+        """Where a track (default: the output) expects the ball, and how big. Or None."""
+        h = track if track is not None else self._out
+        if h is None or not h.filter.initialised or h.filter.lost():
             return None
-        p_cam = self.transform.field_to_camera(self.filter.position)[0]
+        p_cam = self.transform.field_to_camera(h.filter.position)[0]
         if p_cam[2] <= 1e-3:
             return None  # behind the camera
         uv = self.K @ (p_cam / p_cam[2])
         r = self.fx * self.radius_m / float(p_cam[2])
         return (float(uv[0]), float(uv[1])), float(r)
+
+    # -- tracks ------------------------------------------------------------
+
+    def _measure(self, h: _Hypothesis, blob: BallBlob) -> bool:
+        """Offer one blob to one track. False, track untouched, if refused."""
+        votes = (h.air_votes, h.airborne)
+        obs = self.observe(blob, h)
+        use_air = obs.airborne and obs.air_point is not None and obs.air_cov is not None
+        point = obs.air_point if use_air else obs.ground_point
+        f = h.filter
+        if point is None:
+            ok = False
+        elif not f.initialised:
+            f.start(point, grounded=not use_air)
+            ok = True
+        else:
+            # A regime change moves the estimate by the whole ground/air gap, not
+            # by a measurement's noise. Tell the filter how far, so the gate lets
+            # the first measurement of the new regime in.
+            jump = float(np.linalg.norm(np.asarray(point, np.float64) - f.position))
+            if use_air:
+                ok = f.update_airborne(point, obs.air_cov, jump=jump)
+            else:
+                ok = f.update_grounded(
+                    np.asarray(point)[:2], obs.sigma_xy, self.radius_m, jump=jump
+                )
+        if ok:
+            h.hit, h.blob, h.obs = True, blob, obs
+        else:
+            h.air_votes, h.airborne = votes  # a refused blob does not get a vote
+        return ok
+
+    def _plausible(self, h: _Hypothesis) -> bool:
+        if self.field is None:
+            return True
+        x, y, z = h.filter.position
+        f, m = self.field, self.field_margin
+        return (f.x0 - m <= x <= f.x0 + f.width + m
+                and f.y0 - m <= y <= f.y0 + f.height + m
+                and z <= self.max_z)
+
+    def _choose(self) -> _Hypothesis | None:
+        ready = [h for h in self.tracks if h.health >= self.CONFIRM or len(self.tracks) == 1]
+        if not ready:
+            return self._out  # nothing confirmed: hold, which reads lost once it ages out
+        best = max(ready, key=lambda h: (self._plausible(h), h.health))
+        cur = self._out
+        if (cur is not None and cur in ready and cur is not best
+                and self._plausible(cur) == self._plausible(best)
+                and best.health - cur.health < self.SWITCH):
+            return cur
+        return best
 
     # -- one frame ---------------------------------------------------------
 
@@ -645,50 +783,75 @@ class BallTracker:
         camera actually delivers a jittery 24 will mis-scale every velocity it
         reports, and the error looks like drift rather than like a bug.
         """
-        self.filter.predict(dt)
+        for h in self.tracks:
+            h.filter.predict(dt)
+            h.hit, h.blob, h.obs = False, None, None
+        if self._out is not None and self._out not in self.tracks:
+            self._out.filter.predict(dt)  # held after its track died: age keeps running
 
         pred = self.predicted_pixel()
         mask = self.detector.mask(frame_bgr)
-        blob = self.detector.best(
+        blobs = self.detector.ranked(
             mask,
             predicted_px=pred[0] if pred else None,
             predicted_radius_px=pred[1] if pred else None,
-        )
+        )[: self.max_candidates]
         self.last_mask = mask
-        self.last_blob = blob
 
-        if blob is None:
-            self.last_obs = None
-            if not self.filter.initialised:
-                return None
-            # Coast on the prediction, and say so via visible=False.
-            return self.filter.state(visible=False)
+        # Each track claims at most one blob, closest (in reach radii) first.
+        pairs: list[tuple[float, int, int]] = []
+        for i, h in enumerate(self.tracks):
+            p = self.predicted_pixel(h)
+            if p is None:
+                continue
+            (pu, pv), pr = p
+            # Reach circle, metres -> pixels at the predicted depth, plus the
+            # ball's own size so a near ball's centroid jitter is not a jump.
+            depth = self.fx * self.radius_m / max(pr, 1e-6)
+            reach_m = self.ball_max_speed * h.filter.age + self.REACH_MARGIN
+            reach = self.fx * reach_m / depth + 2.0 * pr
+            for j, b in enumerate(blobs):
+                d = float(np.hypot(b.u - pu, b.v - pv))
+                if d <= reach:
+                    pairs.append((d / reach, i, j))
+        used: set[int] = set()
+        for _, i, j in sorted(pairs):
+            h = self.tracks[i]
+            if h.hit or j in used:
+                continue
+            if self._measure(h, blobs[j]):
+                used.add(j)
+        for h in self.tracks:
+            h.health = (min(h.health + self.HEALTH_INC, self.HEALTH_MAX) if h.hit
+                        else max(h.health - 1, 0))
 
-        obs = self.observe(blob)
-        self.last_obs = obs
+        # Leftovers start tracks of their own: a false positive then costs a
+        # short-lived track instead of hijacking the real ball's.
+        for j, b in enumerate(blobs):
+            if j in used:
+                continue
+            h = _Hypothesis(self._new_filter())
+            if not self._measure(h, b):
+                continue
+            h.health = self.HEALTH_INC
+            if len(self.tracks) >= self.max_tracks:
+                # Full: only a plausible newcomer may evict, and only an
+                # implausible track that is not the output.
+                spare = [t for t in self.tracks
+                         if t is not self._out and not self._plausible(t)]
+                if not spare or not self._plausible(h):
+                    continue
+                self.tracks.remove(min(spare, key=lambda t: t.health))
+            self.tracks.append(h)
+            used.add(j)
 
-        use_air = obs.airborne and obs.air_point is not None and obs.air_cov is not None
-        point = obs.air_point if use_air else obs.ground_point
-        if point is None:
-            return self.filter.state(visible=False) if self.filter.initialised else None
+        self.tracks = [h for h in self.tracks if not h.filter.lost()]
+        self._out = out = self._choose()
 
-        if not self.filter.initialised or self.filter.lost():
-            # Unseen or gated out for longer than the ball could plausibly be
-            # hidden: the track is stale rather than occluded, and its held
-            # position and velocity are not worth gating a sighting against.
-            # Start over on what we see.
-            self.filter.start(point, grounded=not use_air)
-            return self.filter.state(visible=True)
-
-        # A regime change moves the estimate by the whole ground/air gap, not
-        # by a measurement's noise. Tell the filter how far, so the gate lets
-        # the first measurement of the new regime in.
-        jump = float(np.linalg.norm(np.asarray(point, np.float64) - self.filter.position))
-        if use_air:
-            accepted = self.filter.update_airborne(point, obs.air_cov, jump=jump)
-        else:
-            accepted = self.filter.update_grounded(
-                np.asarray(point)[:2], obs.sigma_xy, self.radius_m, jump=jump
-            )
-
-        return self.filter.state(visible=accepted)
+        self.last_blob = (out.blob if out is not None and out.blob is not None
+                          else (blobs[0] if blobs else None))
+        self.last_obs = out.obs if out is not None else None
+        if out is None:
+            return None
+        # visible=False: the output track is coasting on its prediction.
+        return out.filter.state(visible=out.hit)

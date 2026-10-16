@@ -535,7 +535,7 @@ def build_transform(args, field: Field, mode: str) -> CameraFieldTransform:
     return SyntheticFieldTransform.wall(field, args.distance, args.yaw, args.pitch_wall)
 
 
-def _new_ball_tracker(args, color, transform, K) -> BallTracker:
+def _new_ball_tracker(args, color, transform, K, field) -> BallTracker:
     """A BallTracker for the *already undistorted* frame this tool hands it.
 
     dist is None on purpose, and deliberately not a parameter: by the time the
@@ -546,7 +546,7 @@ def _new_ball_tracker(args, color, transform, K) -> BallTracker:
     """
     return BallTracker(
         color, transform, K, None, sigma_px=args.ball_sigma_px,
-        sigma_a=args.ball_sigma_a, sigma_a_air=args.ball_sigma_a_air,
+        sigma_a=args.ball_sigma_a, sigma_a_air=args.ball_sigma_a_air, field=field,
     )
 
 
@@ -740,7 +740,7 @@ def main() -> None:
         tag_tracker = TagTracker(field, sigma_a=args.tag_sigma_a,
                                  sigma_alpha_deg=args.tag_sigma_alpha,
                                  max_coast_s=args.tag_coast)
-        ball_tracker = _new_ball_tracker(args, color, transform, K)
+        ball_tracker = _new_ball_tracker(args, color, transform, K, field)
 
         plan = PlanView(field, height=h, mode=mode)
         tag_trails: dict[int, deque] = defaultdict(lambda: deque(maxlen=TAG_TRAIL_LEN))
@@ -913,14 +913,14 @@ def main() -> None:
                     # Leaving this out makes `r` clear the tag tracks while
                     # silently keeping the ball track, which may be exactly the
                     # thing you pressed `r` to get rid of.
-                    ball_tracker = _new_ball_tracker(args, color, transform, K)
+                    ball_tracker = _new_ball_tracker(args, color, transform, K, field)
                 elif key in (ord("["), ord("]")):
                     K = K.copy()
                     K[0, 0] *= 0.98 if key == ord("[") else 1.02
                     K[1, 1] = K[0, 0]
                     intr_source = "hand-tuned"
                     undistort_maps = intr.undistort_maps(K, dist, w, h)
-                    ball_tracker = _new_ball_tracker(args, color, transform, K)
+                    ball_tracker = _new_ball_tracker(args, color, transform, K, field)
                     print(f"fx {K[0, 0]:.1f}  -> {intr.hfov_of(K, w):.1f} deg HFOV")
                 elif key == ord("w"):
                     if using_calibrated:
@@ -933,7 +933,7 @@ def main() -> None:
                         tag_trails.clear()
                         ball_trail.clear()
                         tag_tracker.reset()
-                        ball_tracker = _new_ball_tracker(args, color, transform, K)
+                        ball_tracker = _new_ball_tracker(args, color, transform, K, field)
                         off_plane = OffPlaneWatch(synthetic=True)
                         print(f"transform: {transform.source}")
                 elif key == ord("s"):
