@@ -4,6 +4,10 @@ A collection of robotics capabilities — **one folder per skill** — built as 
 RoboCup proof of concept. Everything reports positions in **metres, in field
 coordinates**, from a single webcam.
 
+## ⭐IMPORTANT⭐
+
+> **This repository has been archived.** Development continues at [cornell-cup/robocup_software](https://github.com/cornell-cup/robocup_software).
+
 ## The skills
 
 | Skill | What it tracks | Output |
